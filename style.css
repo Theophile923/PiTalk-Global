@@ -209,6 +209,11 @@ img{max-width:100%;display:block;}
 .mic-btn:focus-visible{outline:3px solid var(--gold);outline-offset:3px;}
 .mic-icon{width:18px;height:26px;background:#fff;border-radius:9px;display:block;}
 .mic-hint{font-size:0.75rem;color:rgba(255,255,255,.5);margin-top:0.75rem;}
+.btn--clear{
+  color:rgba(255,255,255,.6);font-size:0.78rem;
+  padding:0.3rem;margin-bottom:0.75rem;text-decoration:underline;
+}
+.btn--clear:hover{color:#fff;}
 
 /* ===== LANGUAGES ===== */
 .lang-grid{
