@@ -46,6 +46,7 @@ const statusText = document.getElementById("phoneStatusText");
 const statusDot = document.querySelector(".dot");
 const transcript = document.getElementById("transcript");
 const authBtn = document.getElementById("authBtn");
+const clearBtn = document.getElementById("clearBtn");
 
 function setStatus(text, color) {
   if (statusText) statusText.textContent = text;
@@ -154,10 +155,23 @@ function stopRecording(e) {
     setTimeout(() => {
       setStatus("Speaking output…", "#5EE0A0");
       transcript.innerHTML += `<p style="margin-top:.6rem;color:#F5C36B;"><strong>Simulated translation (not real yet):</strong> ${line}</p>`;
+      if (clearBtn) clearBtn.style.display = "inline-block";
     }, 1000);
 
     setTimeout(() => setStatus("Ready", "#5EE0A0"), 2000);
   };
+}
+
+if (clearBtn) {
+  clearBtn.addEventListener("click", () => {
+    if (currentAudioUrl) {
+      URL.revokeObjectURL(currentAudioUrl);
+      currentAudioUrl = null;
+    }
+    transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
+    clearBtn.style.display = "none";
+    setStatus("Ready", "#5EE0A0");
+  });
 }
 
 if (micBtn) {
