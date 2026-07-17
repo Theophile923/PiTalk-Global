@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Welcome — PiTalk Global</title>
+<link rel="icon" type="image/png" href="assets/logo.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+<style>
+  body{background:radial-gradient(circle at 20% 15%,#4a1f8f 0%,var(--deep-purple) 55%);min-height:100vh;color:#fff;}
+  .onboard{
+    max-width:420px;margin:0 auto;min-height:100vh;
+    display:flex;flex-direction:column;justify-content:space-between;
+    padding:2.5rem 1.5rem 2rem;
+  }
+  .onboard__skip{align-self:flex-end;color:rgba(255,255,255,.55);font-size:0.85rem;background:none;border:none;cursor:pointer;}
+  .onboard__body{text-align:center;flex:1;display:flex;flex-direction:column;justify-content:center;}
+  .onboard__icon{font-size:3rem;margin-bottom:1.5rem;}
+  .onboard__body h1{font-size:1.6rem;margin-bottom:0.85rem;line-height:1.25;}
+  .onboard__body p{color:rgba(255,255,255,.75);font-size:0.95rem;max-width:320px;margin:0 auto;}
+  .onboard__dots{display:flex;gap:0.4rem;justify-content:center;margin:2rem 0;}
+  .onboard__dots span{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25);transition:background .2s,width .2s;}
+  .onboard__dots span.active{background:var(--gold);width:20px;border-radius:4px;}
+  .onboard__actions{display:flex;flex-direction:column;gap:0.75rem;}
+  .name-input, .lang-radio{width:100%;}
+  .name-input input{
+    width:100%;padding:0.85rem 1rem;border-radius:12px;
+    border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);
+    color:#fff;font-size:1rem;font-family:var(--font-body);margin-top:1.5rem;
+  }
+  .name-input input::placeholder{color:rgba(255,255,255,.4);}
+  .lang-radio{display:flex;flex-direction:column;gap:0.6rem;margin-top:1.75rem;}
+  .lang-option{
+    display:flex;align-items:center;gap:0.75rem;
+    padding:0.85rem 1rem;border-radius:12px;
+    border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.05);
+    cursor:pointer;text-align:left;font-size:0.95rem;
+  }
+  .lang-option.selected{border-color:var(--gold);background:rgba(245,195,107,.12);}
+  .lang-option input{accent-color:var(--gold);}
+  .screen{display:none;}
+  .screen.active{display:flex;flex-direction:column;flex:1;}
+</style>
+</head>
+<body>
+
+<div class="onboard">
+  <button class="onboard__skip" id="skipBtn">Skip</button>
+
+  <!-- Screen 1 -->
+  <div class="screen active" data-screen="1">
+    <div class="onboard__body">
+      <div class="brand-mark" style="justify-content:center;height:26px;margin-bottom:1.5rem;">
+        <span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span>
+      </div>
+      <h1>Welcome to PiTalk Global</h1>
+      <p>Speak your language, out loud. The pioneer on the other end hears theirs — no typing, no waiting.</p>
+    </div>
+  </div>
+
+  <!-- Screen 2 -->
+  <div class="screen" data-screen="2">
+    <div class="onboard__body">
+      <div class="onboard__icon">🗣️</div>
+      <h1>Talk business, freely</h1>
+      <p>Negotiate a price, close a deal, or just catch up with a fellow pioneer — language is no longer the barrier.</p>
+    </div>
+  </div>
+
+  <!-- Screen 3: name -->
+  <div class="screen" data-screen="3">
+    <div class="onboard__body">
+      <div class="onboard__icon">👋</div>
+      <h1>What should we call you?</h1>
+      <p>This is just for your demo session on this device — no account needed yet.</p>
+      <div class="name-input">
+        <input type="text" id="nameInput" placeholder="Your name" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Screen 4: language -->
+  <div class="screen" data-screen="4">
+    <div class="onboard__body">
+      <div class="onboard__icon">🌍</div>
+      <h1>Which language do you speak?</h1>
+      <p>You can change this anytime in the app.</p>
+      <div class="lang-radio" id="langRadio">
+        <label class="lang-option"><input type="radio" name="lang" value="English" checked> 🇬🇧 English</label>
+        <label class="lang-option"><input type="radio" name="lang" value="French"> 🇫🇷 French</label>
+        <label class="lang-option"><input type="radio" name="lang" value="Chinese (Mandarin)"> 🇨🇳 Chinese (Mandarin)</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="onboard__dots" id="dots">
+    <span class="active"></span><span></span><span></span><span></span>
+  </div>
+
+  <div class="onboard__actions">
+    <button class="btn btn--primary" id="nextBtn">Continue</button>
+  </div>
+</div>
+
+<script>
+  const screens = document.querySelectorAll(".screen");
+  const dots = document.querySelectorAll("#dots span");
+  const nextBtn = document.getElementById("nextBtn");
+  const skipBtn = document.getElementById("skipBtn");
+  let step = 1;
+  const total = screens.length;
+
+  function render() {
+    screens.forEach(s => s.classList.toggle("active", Number(s.dataset.screen) === step));
+    dots.forEach((d, i) => d.classList.toggle("active", i === step - 1));
+    nextBtn.textContent = step === total ? "Start using PiTalk Global" : "Continue";
+  }
+
+  function finishOnboarding() {
+    const name = document.getElementById("nameInput").value.trim();
+    const lang = document.querySelector('input[name="lang"]:checked').value;
+
+    let prefs = {};
+    try { prefs = JSON.parse(localStorage.getItem("pitalk_prefs_v1")) || {}; } catch {}
+    prefs.langYou = lang;
+    prefs.displayName = name || "Pioneer";
+    prefs.onboarded = true;
+    localStorage.setItem("pitalk_prefs_v1", JSON.stringify(prefs));
+
+    window.location.href = "index.html";
+  }
+
+  nextBtn.addEventListener("click", () => {
+    if (step < total) {
+      step++;
+      render();
+    } else {
+      finishOnboarding();
+    }
+  });
+
+  skipBtn.addEventListener("click", finishOnboarding);
+
+  document.querySelectorAll('input[name="lang"]').forEach(input => {
+    input.addEventListener("change", () => {
+      document.querySelectorAll(".lang-option").forEach(opt => opt.classList.remove("selected"));
+      input.closest(".lang-option").classList.add("selected");
+    });
+  });
+
+  render();
+</script>
+
+</body>
+</html>
