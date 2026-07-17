@@ -1,258 +1,199 @@
-/* ============================================================
-   PiTalk Global — front-end shell (Optimized)
-   ============================================================ */
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PiTalk Global — Speak yours. Hear theirs.</title>
+<meta name="description" content="PiTalk Global lets Pi Network pioneers speak freely across languages in real time, starting with English, French, and Chinese." />
+<link rel="icon" type="image/png" href="assets/logo.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+<script src="https://sdk.minepi.com/pi-sdk.js"></script>
+</head>
+<body>
 
-const STORAGE_KEY = "pitalk_prefs_v1";
+<!-- ============ NAV ============ -->
+<header class="nav">
+  <div class="nav__inner">
+    <a class="nav__brand" href="#top">
+      <span class="brand-mark" aria-hidden="true">
+        <span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span>
+      </span>
+      PiTalk <em>Global</em>
+    </a>
+    <nav class="nav__links">
+      <a href="#how">How it works</a>
+      <a href="#demo">Live demo</a>
+      <a href="#languages">Languages</a>
+      <a href="#pricing">Pricing</a>
+    </nav>
+    <button class="btn btn--ghost" id="authBtn">Sign in with Pi</button>
+  </div>
+</header>
 
-// ---- Configuration & State ----
-let mediaRecorder = null;
-let audioChunks = [];
-let micStream = null;
-let demoIndex = 0;
-let currentUser = null;
-let currentAudioUrl = null; // Track audio URL to prevent memory leaks
+<!-- ============ HERO ============ -->
+<section class="hero" id="top">
+  <div class="hero__inner">
+    <p class="eyebrow">Real-time voice translation · Built for Pi Network pioneers</p>
+    <h1 class="hero__title">Speak yours.<br><span class="accent">They hear theirs.</span></h1>
+    <p class="hero__sub">Talk business, negotiate, or just catch up — in your own language, out loud, in real time. No typing. No waiting.</p>
 
-const DEMO_TRANSLATIONS = [
-  "Quel est votre meilleur prix pour 50 unités ?",
-  "Nous pouvons livrer sous cinq jours.",
-  "Pouvons-nous nous mettre d'accord aujourd'hui ?",
-];
+    <div class="hero__cta">
+      <button class="btn btn--primary" id="tryDemoBtn">Try the live demo</button>
+      <a class="btn btn--text" href="#how">See how it works ↓</a>
+    </div>
 
-// ---- Helper Functions ----
-function loadPrefs() {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
-  } catch {
-    return {};
-  }
-}
+    <div class="hero__waveform" aria-hidden="true">
+      <div class="wave-stage">
+        <span class="lang-pill lang-pill--left">🇬🇧 English</span>
+        <div class="wave" id="heroWave">
+          <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <span class="lang-pill lang-pill--right">🇫🇷 Français</span>
+      </div>
+      <p class="wave-caption">Translating in real time — a few seconds, not minutes</p>
+    </div>
+  </div>
+</section>
 
-function savePrefs(prefs) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
-  } catch (e) {
-    console.warn("Failed to save preferences:", e);
-  }
-}
+<!-- ============ HOW IT WORKS ============ -->
+<section class="section" id="how">
+  <h2 class="section__title">Three steps. One conversation.</h2>
+  <div class="steps">
+    <div class="step">
+      <span class="step__num">01</span>
+      <h3>Speak</h3>
+      <p>Pick your language once. After that, just talk — the mic listens for you, no push-to-type.</p>
+    </div>
+    <div class="step">
+      <span class="step__num">02</span>
+      <h3>Translate</h3>
+      <p>Your words are converted to text, translated, and turned back into speech — automatically, in the background.</p>
+    </div>
+    <div class="step">
+      <span class="step__num">03</span>
+      <h3>Hear</h3>
+      <p>The other pioneer hears you in their language. They reply in theirs. You hear them in yours.</p>
+    </div>
+  </div>
+</section>
 
-// ---- UI Elements ----
-const micBtn = document.getElementById("micBtn");
-const statusText = document.getElementById("phoneStatusText");
-const statusDot = document.querySelector(".dot");
-const transcript = document.getElementById("transcript");
-const authBtn = document.getElementById("authBtn");
+<!-- ============ LIVE DEMO (mock) ============ -->
+<section class="section section--dark" id="demo">
+  <h2 class="section__title">Try a live demo</h2>
+  <p class="section__sub">This is a preview of the call screen. Voice-to-voice translation connects here once the engine is live — for now, tap through the flow below.</p>
 
-function setStatus(text, color) {
-  if (statusText) statusText.textContent = text;
-  if (statusDot) statusDot.style.background = color;
-}
+  <div class="phone">
+    <div class="phone__status" id="phoneStatus">
+      <span class="dot"></span> <span id="phoneStatusText">Ready</span>
+    </div>
 
-// ---- Initialization ----
-document.addEventListener("DOMContentLoaded", () => {
-  const prefs = loadPrefs();
+    <div class="phone__langs">
+      <div class="lang-select">
+        <label>You speak</label>
+        <select id="langYou">
+          <option>English</option>
+          <option>French</option>
+          <option>Chinese (Mandarin)</option>
+        </select>
+      </div>
+      <span class="swap" aria-hidden="true">⇄</span>
+      <div class="lang-select">
+        <label>They hear</label>
+        <select id="langThem">
+          <option>French</option>
+          <option>English</option>
+          <option>Chinese (Mandarin)</option>
+        </select>
+      </div>
+    </div>
 
-  // 1. Onboarding check
-  if (!prefs.onboarded && !window.location.pathname.includes("onboarding.html")) {
-    window.location.href = "onboarding.html";
-    return;
-  }
+    <div class="phone__transcript" id="transcript">
+      <p class="transcript__placeholder">Your live transcript will appear here during a call.</p>
+    </div>
 
-  // 2. Pi SDK Single Initialization
-  if (typeof Pi !== "undefined") {
-    try {
-      Pi.init({ version: "2.0", sandbox: false });
-    } catch (err) {
-      console.error("Pi SDK initialization failed:", err);
-    }
-  }
+    <button class="mic-btn" id="micBtn" aria-label="Push to talk">
+      <span class="mic-icon"></span>
+    </button>
+    <p class="mic-hint">Hold to talk (real mic, playback only)</p>
+  </div>
+</section>
 
-  // 3. Restore Preferences
-  const langYou = document.getElementById("langYou");
-  const langThem = document.getElementById("langThem");
+<!-- ============ LANGUAGES ============ -->
+<section class="section" id="languages">
+  <h2 class="section__title">Launch languages</h2>
+  <p class="section__sub">Chosen first because they give the most accurate, most natural-sounding translation from day one.</p>
+  <div class="lang-grid">
+    <div class="lang-card lang-card--live">
+      <span class="lang-flag">🇬🇧</span><span>English</span><em>Live</em>
+    </div>
+    <div class="lang-card lang-card--live">
+      <span class="lang-flag">🇫🇷</span><span>French</span><em>Live</em>
+    </div>
+    <div class="lang-card lang-card--live">
+      <span class="lang-flag">🇨🇳</span><span>Chinese</span><em>Live</em>
+    </div>
+    <div class="lang-card lang-card--soon">
+      <span class="lang-flag">🇷🇼</span><span>Kinyarwanda</span><em>Phase 2</em>
+    </div>
+    <div class="lang-card lang-card--soon">
+      <span class="lang-flag">🇰🇪</span><span>Swahili</span><em>Phase 2</em>
+    </div>
+    <div class="lang-card lang-card--soon">
+      <span class="lang-flag">🇪🇸</span><span>Spanish</span><em>Phase 2</em>
+    </div>
+  </div>
+</section>
 
-  if (langYou && prefs.langYou) langYou.value = prefs.langYou;
-  if (langThem && prefs.langThem) langThem.value = prefs.langThem;
+<!-- ============ PRICING ============ -->
+<section class="section section--dark" id="pricing">
+  <h2 class="section__title">Pay only in Pi</h2>
+  <p class="section__sub">Pick the rhythm that fits how you use PiTalk Global.</p>
+  <div class="pricing-grid">
+    <div class="price-card">
+      <h3>Hourly</h3>
+      <p class="price-tag">Pay as you talk</p>
+      <p class="price-desc">Best for a single call — business meeting or a quick catch-up.</p>
+      <button class="btn btn--plan" data-plan="hourly" data-amount="0.1">Choose Hourly</button>
+    </div>
+    <div class="price-card">
+      <h3>Daily</h3>
+      <p class="price-tag">One day, unlimited calls</p>
+      <p class="price-desc">Good for travel days or an event with many conversations.</p>
+      <button class="btn btn--plan" data-plan="daily" data-amount="0.5">Choose Daily</button>
+    </div>
+    <div class="price-card">
+      <h3>Monthly</h3>
+      <p class="price-tag">Regular use</p>
+      <p class="price-desc">For pioneers who talk across languages every week.</p>
+      <button class="btn btn--plan" data-plan="monthly" data-amount="3">Choose Monthly</button>
+    </div>
+    <div class="price-card price-card--vip">
+      <span class="vip-badge">VIP</span>
+      <h3>Annual</h3>
+      <p class="price-tag">Best value + VIP status</p>
+      <p class="price-desc">Unlimited fair-use translation, priority low-latency servers, extended history, priority support.</p>
+      <button class="btn btn--plan btn--plan-vip" data-plan="annual" data-amount="25">Choose Annual</button>
+    </div>
+  </div>
+  <p class="pricing-note">Amounts shown are placeholders — confirm final Pi pricing before launch.</p>
+</section>
 
-  const eyebrow = document.querySelector(".eyebrow");
-  if (eyebrow && prefs.displayName) {
-    eyebrow.textContent = `Welcome back, ${prefs.displayName} · Real-time voice translation`;
-  }
+<!-- ============ FOOTER ============ -->
+<footer class="footer">
+  <div class="footer__inner">
+    <span class="nav__brand nav__brand--footer">
+      <span class="brand-mark" aria-hidden="true">
+        <span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span>
+      </span>
+      PiTalk Global
+    </span>
+    <p>Built for the Pi Network community. Payments in Pi only.</p>
+    <p class="footer__links"><a href="privacy.html">Privacy Policy</a></p>
+  </div>
+</footer>
 
-  // 4. Settings change listeners
-  if (langYou && langThem) {
-    [langYou, langThem].forEach((sel) => {
-      sel.addEventListener("change", () => {
-        savePrefs({ ...loadPrefs(), langYou: langYou.value, langThem: langThem.value });
-      });
-    });
-  }
-
-  // 5. Active plan UI restoration
-  if (prefs.activePlan) {
-    const activeBtn = document.querySelector(`.btn--plan[data-plan="${prefs.activePlan}"]`);
-    if (activeBtn) activeBtn.textContent = "Subscribed ✓";
-  }
-});
-
-// ---- Smooth Scroll ----
-const tryDemoBtn = document.getElementById("tryDemoBtn");
-if (tryDemoBtn) {
-  tryDemoBtn.addEventListener("click", () => {
-    const demoSection = document.getElementById("demo");
-    if (demoSection) demoSection.scrollIntoView({ behavior: "smooth" });
-  });
-}
-
-// ---- Microphone & Demo Engine ----
-async function startRecording(e) {
-  e.preventDefault();
-  
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    alert("This browser can't access the microphone. Try the Pi Browser or a recent Chrome/Safari version.");
-    return;
-  }
-  
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch (err) {
-    alert("Microphone access wasn't granted. Please allow microphone permission and try again.");
-    return;
-  }
-
-  // Free previous audio URL memory if it exists
-  if (currentAudioUrl) {
-    URL.revokeObjectURL(currentAudioUrl);
-  }
-
-  audioChunks = [];
-  mediaRecorder = new MediaRecorder(micStream);
-  mediaRecorder.ondataavailable = (ev) => audioChunks.push(ev.data);
-  mediaRecorder.start();
-  
-  micBtn.classList.add("recording");
-  setStatus("Listening…", "#F5C36B");
-  transcript.innerHTML = `<p class="transcript__placeholder">Recording… release the button when you're done.</p>`;
-}
-
-function stopRecording(e) {
-  if (e) e.preventDefault(); // Prevents double triggers on mobile
-  if (!mediaRecorder || mediaRecorder.state === "inactive") return;
-
-  micBtn.classList.remove("recording");
-  mediaRecorder.stop();
-  
-  mediaRecorder.onstop = () => {
-    if (micStream) {
-      micStream.getTracks().forEach((t) => t.stop());
-    }
-    
-    const blob = new Blob(audioChunks, { type: "audio/webm" });
-    currentAudioUrl = URL.createObjectURL(blob);
-
-    setStatus("Translating…", "#9B5CE0");
-    transcript.innerHTML = `<p><strong>Your recording:</strong></p><audio controls src="${currentAudioUrl}" style="width:100%;margin:.4rem 0 0;"></audio>`;
-
-    const line = DEMO_TRANSLATIONS[demoIndex % DEMO_TRANSLATIONS.length];
-    demoIndex++;
-
-    setTimeout(() => {
-      setStatus("Speaking output…", "#5EE0A0");
-      transcript.innerHTML += `<p style="margin-top:.6rem;color:#F5C36B;"><strong>Simulated translation (not real yet):</strong> ${line}</p>`;
-    }, 1000);
-    
-    setTimeout(() => setStatus("Ready", "#5EE0A0"), 2000);
-  };
-}
-
-if (micBtn) {
-  micBtn.addEventListener("mousedown", startRecording);
-  micBtn.addEventListener("touchstart", startRecording, { passive: false });
-  micBtn.addEventListener("mouseup", stopRecording);
-  micBtn.addEventListener("mouseleave", stopRecording);
-  micBtn.addEventListener("touchend", stopRecording, { passive: false });
-}
-
-// ---- Pi Authentication ----
-function onIncompletePaymentFound(payment) {
-  console.log("Incomplete payment found:", payment);
-  // Future upgrade: Send this incomplete payment to your backend to resolve/cancel it.
-}
-
-async function signInWithPi() {
-  if (typeof Pi === "undefined") {
-    alert("Open this app inside the Pi Browser to sign in with Pi.");
-    return null;
-  }
-  try {
-    const scopes = ["username", "payments"];
-    // Pi.init is already run on DOMContentLoaded
-    const auth = await Pi.authenticate(scopes, onIncompletePaymentFound);
-    currentUser = auth.user;
-    if (authBtn) authBtn.textContent = `Hi, ${auth.user.username}`;
-    return auth.user;
-  } catch (err) {
-    console.error("Pi authentication failed:", err);
-    alert("Sign-in failed. Please try again from the Pi Browser.");
-    return null;
-  }
-}
-
-if (authBtn) {
-  authBtn.addEventListener("click", signInWithPi);
-}
-
-// ---- Subscription payments ----
-document.querySelectorAll(".btn--plan").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    if (typeof Pi === "undefined") {
-      alert("Open this app inside the Pi Browser to subscribe with Pi.");
-      return;
-    }
-    if (!currentUser) {
-      const user = await signInWithPi();
-      if (!user) return;
-    }
-
-    const plan = btn.dataset.plan;
-    const amount = parseFloat(btn.dataset.amount);
-    const originalLabel = btn.textContent;
-    btn.textContent = "Processing…";
-    btn.disabled = true;
-
-    try {
-      await Pi.createPayment(
-        {
-          amount: amount,
-          memo: `PiTalk Global — ${plan} plan`,
-          metadata: { plan },
-        },
-        {
-          onReadyForServerApproval: (paymentId) => {
-            console.log("Send to backend for approval:", paymentId);
-            // Must make an AJAX request to your secure backend API here.
-          },
-          onReadyForCompletion: (paymentId, txid) => {
-            console.log("Send to backend for completion:", paymentId, txid);
-            // Must make an AJAX request to your secure backend API here.
-            savePrefs({ ...loadPrefs(), activePlan: plan, subscribedAt: Date.now() });
-            btn.textContent = "Subscribed ✓";
-          },
-          onCancel: (paymentId) => {
-            console.log("Payment cancelled:", paymentId);
-            btn.textContent = originalLabel;
-            btn.disabled = false;
-          },
-          onError: (error, payment) => {
-            console.error("Payment error:", error, payment);
-            btn.textContent = originalLabel;
-            btn.disabled = false;
-          },
-        }
-      );
-    } catch (err) {
-      console.error("createPayment failed:", err);
-      btn.textContent = originalLabel;
-      btn.disabled = false;
-    }
-  });
-});
+<script src="app.js"></script>
+</body>
+</html>
