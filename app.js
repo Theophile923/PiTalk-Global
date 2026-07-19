@@ -18,7 +18,10 @@
    ============================================================ */
 
 const STORAGE_KEY = "pitalk_prefs_v1";
-const TRANSLATE_ENDPOINT = "https://libretranslate.com/translate";
+// NOTE: LibreTranslate's public instance now requires a paid API key even for
+// light use, so we use MyMemory instead — free, no signup, CORS-enabled,
+// ~5,000 characters/day per visitor. Fine for testing, not for real launch scale.
+const TRANSLATE_ENDPOINT = "https://api.mymemory.translated.net/get";
 
 const LANG_CODES = {
   "English": { bcp47: "en-US", iso: "en" },
@@ -180,13 +183,17 @@ async function stopRecording(e) {
     const targetLang = targetLangObj.iso;
 
     try {
-      const res = await fetch(TRANSLATE_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q: text, source: sourceLang, target: targetLang, format: "text" }),
+      const params = new URLSearchParams({
+        q: text.slice(0, 500),
+        langpair: `${sourceLang}|${targetLang}`,
       });
+      const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
       const data = await res.json();
-      const translated = data.translatedText || "(no translation returned)";
+
+      if (data.responseStatus !== 200 || !data.responseData) {
+        throw new Error(data.responseDetails || "Translation failed");
+      }
+      const translated = data.responseData.translatedText;
 
       setStatus("Speaking output…", "#5EE0A0");
       transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#F5C36B;"><strong>Translation:</strong> ${translated}</p>`;
