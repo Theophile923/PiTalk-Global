@@ -1,29 +1,32 @@
 /* ============================================================
-   PiTalk Global — front-end shell (Optimized)
+   PiTalk Global — front-end shell
    NOTE FOR GOODHOPE:
-   - The mic below records and plays back your own voice for
-     real push-to-talk testing. It is NOT wired to a real
-     translation engine yet — the translated line is a labeled
-     placeholder until STT/MT/TTS is built.
+   - Minimal working MVP: real speech recognition, real machine
+     translation, real spoken output — for English <-> French
+     (and Chinese, best-effort) using free browser + public APIs.
+   - Speech recognition & speech synthesis use the browser's
+     built-in Web Speech API (Chrome only, reliable). Audio you
+     speak is sent to the browser vendor's recognition service —
+     this is a browser feature, not something PiTalk Global
+     stores or controls.
+   - Translation uses the public LibreTranslate API. That public
+     instance is meant for testing/personal use, not high-volume
+     production — get a paid API key before real launch.
    - Persistence uses localStorage until this app is officially
      registered in Pi App Studio (blocked on KYC) and can use
      App Studio's real multi-device persistent storage instead.
    ============================================================ */
 
 const STORAGE_KEY = "pitalk_prefs_v1";
+const TRANSLATE_ENDPOINT = "https://libretranslate.com/translate";
 
-let mediaRecorder = null;
-let audioChunks = [];
-let micStream = null;
-let demoIndex = 0;
+const LANG_CODES = {
+  "English": { bcp47: "en-US", iso: "en" },
+  "French": { bcp47: "fr-FR", iso: "fr" },
+  "Chinese (Mandarin)": { bcp47: "zh-CN", iso: "zh" },
+};
+
 let currentUser = null;
-let currentAudioUrl = null;
-
-const DEMO_TRANSLATIONS = [
-  "Quel est votre meilleur prix pour 50 unités ?",
-  "Nous pouvons livrer sous cinq jours.",
-  "Pouvons-nous nous mettre d'accord aujourd'hui ?",
-];
 
 function loadPrefs() {
   try {
@@ -102,76 +105,105 @@ if (tryDemoBtn) {
   });
 }
 
-async function startRecording(e) {
+// ---- Real speech recognition -> translation -> spoken output ----
+const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let recognizedText = "";
+
+function startRecording(e) {
   e.preventDefault();
 
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    alert("This browser can't access the microphone. Try the Pi Browser or a recent Chrome/Safari version.");
+  if (!SpeechRecognitionAPI) {
+    alert("Your browser doesn't support live voice recognition. Please test in Chrome.");
     return;
   }
+
+  const langYouSel = document.getElementById("langYou");
+  const youLang = LANG_CODES[langYouSel.value] || LANG_CODES["English"];
+
+  recognizedText = "";
+  recognition = new SpeechRecognitionAPI();
+  recognition.lang = youLang.bcp47;
+  recognition.interimResults = true;
+  recognition.continuous = true;
+
+  recognition.onresult = (event) => {
+    let finalText = "";
+    let interimText = "";
+    for (let i = 0; i < event.results.length; i++) {
+      const piece = event.results[i][0].transcript;
+      if (event.results[i].isFinal) finalText += piece;
+      else interimText += piece;
+    }
+    recognizedText = (finalText + " " + interimText).trim();
+    transcript.innerHTML = `<p><strong>You:</strong> ${recognizedText}</p>`;
+  };
+
+  recognition.onerror = (event) => {
+    console.error("Speech recognition error:", event.error);
+  };
 
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recognition.start();
   } catch (err) {
-    alert("Microphone access wasn't granted. Please allow microphone permission and try again.");
+    console.error("Could not start recognition:", err);
     return;
   }
-
-  if (currentAudioUrl) {
-    URL.revokeObjectURL(currentAudioUrl);
-  }
-
-  audioChunks = [];
-  mediaRecorder = new MediaRecorder(micStream);
-  mediaRecorder.ondataavailable = (ev) => audioChunks.push(ev.data);
-  mediaRecorder.start();
 
   micBtn.classList.add("recording");
   setStatus("Listening…", "#F5C36B");
-  transcript.innerHTML = `<p class="transcript__placeholder">Recording… release the button when you're done.</p>`;
+  transcript.innerHTML = `<p class="transcript__placeholder">Listening… speak now.</p>`;
 }
 
-function stopRecording(e) {
+async function stopRecording(e) {
   if (e) e.preventDefault();
-  if (!mediaRecorder || mediaRecorder.state === "inactive") return;
+  if (!recognition) return;
 
+  recognition.stop();
   micBtn.classList.remove("recording");
-  mediaRecorder.stop();
+  setStatus("Translating…", "#9B5CE0");
 
-  mediaRecorder.onstop = () => {
-    if (micStream) {
-      micStream.getTracks().forEach((t) => t.stop());
+  // Small delay so the final onresult event has time to land
+  setTimeout(async () => {
+    const text = recognizedText.trim();
+
+    if (!text) {
+      setStatus("Ready", "#5EE0A0");
+      transcript.innerHTML = `<p class="transcript__placeholder">Didn't catch that — hold the button and try again.</p>`;
+      return;
     }
 
-    const blob = new Blob(audioChunks, { type: "audio/webm" });
-    currentAudioUrl = URL.createObjectURL(blob);
+    const langYouSel = document.getElementById("langYou");
+    const langThemSel = document.getElementById("langThem");
+    const sourceLang = (LANG_CODES[langYouSel.value] || LANG_CODES["English"]).iso;
+    const targetLangObj = LANG_CODES[langThemSel.value] || LANG_CODES["French"];
+    const targetLang = targetLangObj.iso;
 
-    setStatus("Translating…", "#9B5CE0");
-    transcript.innerHTML = `<p><strong>Your recording:</strong></p><audio controls src="${currentAudioUrl}" style="width:100%;margin:.4rem 0 0;"></audio>`;
+    try {
+      const res = await fetch(TRANSLATE_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ q: text, source: sourceLang, target: targetLang, format: "text" }),
+      });
+      const data = await res.json();
+      const translated = data.translatedText || "(no translation returned)";
 
-    const line = DEMO_TRANSLATIONS[demoIndex % DEMO_TRANSLATIONS.length];
-    demoIndex++;
-
-    setTimeout(() => {
       setStatus("Speaking output…", "#5EE0A0");
-      transcript.innerHTML += `<p style="margin-top:.6rem;color:#F5C36B;"><strong>Simulated translation (not real yet):</strong> ${line}</p>`;
+      transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#F5C36B;"><strong>Translation:</strong> ${translated}</p>`;
       if (clearBtn) clearBtn.style.display = "inline-block";
-    }, 1000);
 
-    setTimeout(() => setStatus("Ready", "#5EE0A0"), 2000);
-  };
-}
-
-if (clearBtn) {
-  clearBtn.addEventListener("click", () => {
-    if (currentAudioUrl) {
-      URL.revokeObjectURL(currentAudioUrl);
-      currentAudioUrl = null;
+      if ("speechSynthesis" in window) {
+        const utter = new SpeechSynthesisUtterance(translated);
+        utter.lang = targetLangObj.bcp47;
+        window.speechSynthesis.speak(utter);
+      }
+    } catch (err) {
+      console.error("Translation request failed:", err);
+      transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#E8546B;">Translation service unavailable right now — try again in a moment.</p>`;
     }
-    transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
-    clearBtn.style.display = "none";
-    setStatus("Ready", "#5EE0A0");
-  });
+
+    setTimeout(() => setStatus("Ready", "#5EE0A0"), 500);
+  }, 400);
 }
 
 if (micBtn) {
@@ -182,6 +214,15 @@ if (micBtn) {
   micBtn.addEventListener("touchend", stopRecording, { passive: false });
 }
 
+if (clearBtn) {
+  clearBtn.addEventListener("click", () => {
+    transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
+    clearBtn.style.display = "none";
+    setStatus("Ready", "#5EE0A0");
+  });
+}
+
+// ---- Pi Authentication ----
 function onIncompletePaymentFound(payment) {
   console.log("Incomplete payment found:", payment);
 }
@@ -208,6 +249,7 @@ if (authBtn) {
   authBtn.addEventListener("click", signInWithPi);
 }
 
+// ---- Subscription payments ----
 document.querySelectorAll(".btn--plan").forEach((btn) => {
   btn.addEventListener("click", async () => {
     if (typeof Pi === "undefined") {
