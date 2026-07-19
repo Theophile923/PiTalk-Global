@@ -5,23 +5,32 @@
      translation, real spoken output — for English <-> French
      (and Chinese, best-effort) using free browser + public APIs.
    - Speech recognition & speech synthesis use the browser's
-     built-in Web Speech API (Chrome only, reliable). Audio you
-     speak is sent to the browser vendor's recognition service —
-     this is a browser feature, not something PiTalk Global
-     stores or controls.
-   - Translation uses the public LibreTranslate API. That public
-     instance is meant for testing/personal use, not high-volume
-     production — get a paid API key before real launch.
+     built-in Web Speech API (Chrome only, reliable).
+   - Translation uses the free MyMemory API (no key, CORS-enabled,
+     ~5,000 chars/day per visitor). Fine for testing, not for
+     real launch scale.
+   - Pi Authentication: auto-triggers on page load AND via the
+     manual "Sign in with Pi" button, per Pi Network's GenAI
+     integration requirements. The access token is sent to a
+     BACKEND endpoint for validation — see BACKEND_BASE_URL below.
+     ⚠️ Until a real backend exists, this falls back to calling
+     Pi's /v2/me endpoint directly from the browser so you can
+     test end-to-end. THIS IS NOT SAFE FOR REAL LAUNCH: a modified
+     client could skip validation entirely. Before going live,
+     move this call to your own server (see validateWithBackend).
    - Persistence uses localStorage until this app is officially
-     registered in Pi App Studio (blocked on KYC) and can use
-     App Studio's real multi-device persistent storage instead.
+     registered in Pi App Studio and can use its real multi-device
+     persistent storage instead.
    ============================================================ */
 
 const STORAGE_KEY = "pitalk_prefs_v1";
-// NOTE: LibreTranslate's public instance now requires a paid API key even for
-// light use, so we use MyMemory instead — free, no signup, CORS-enabled,
-// ~5,000 characters/day per visitor. Fine for testing, not for real launch scale.
 const TRANSLATE_ENDPOINT = "https://api.mymemory.translated.net/get";
+
+// TODO: replace with your real backend once it exists.
+// Your backend should receive the accessToken, call
+// GET https://api.minepi.com/v2/me with Authorization: Bearer <accessToken>,
+// and only then create a session. No Pi API key is required for this call.
+const BACKEND_BASE_URL = ""; // e.g. "https://your-backend.example.com"
 
 const LANG_CODES = {
   "English": { bcp47: "en-US", iso: "en" },
@@ -30,6 +39,7 @@ const LANG_CODES = {
 };
 
 let currentUser = null;
+let piInitPromise = null;
 
 function loadPrefs() {
   try {
@@ -59,20 +69,51 @@ function setStatus(text, color) {
   if (statusDot) statusDot.style.background = color;
 }
 
+// ---- Pi SDK init, treated as a Promise so callers can fully await it ----
+function ensurePiInit() {
+  if (piInitPromise) return piInitPromise;
+  piInitPromise = new Promise((resolve, reject) => {
+    if (typeof Pi === "undefined") {
+      reject(new Error("Pi SDK not available (not running inside the Pi Browser)."));
+      return;
+    }
+    try {
+      const result = Pi.init({ version: "2.0", sandbox: false });
+      // Pi.init may or may not return a promise depending on SDK version — support both.
+      Promise.resolve(result).then(resolve).catch(resolve);
+    } catch (err) {
+      reject(err);
+    }
+  });
+  return piInitPromise;
+}
+
+// ---- Validate the access token before establishing a "session" client-side ----
+async function validateWithBackend(accessToken) {
+  if (BACKEND_BASE_URL) {
+    const res = await fetch(`${BACKEND_BASE_URL}/auth/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessToken }),
+    });
+    if (!res.ok) throw new Error("Backend validation failed");
+    return res.json();
+  }
+
+  // Temporary client-side fallback for testing only (see warning above).
+  const res = await fetch("https://api.minepi.com/v2/me", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error("Pi token validation failed");
+  return res.json();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   const prefs = loadPrefs();
 
   if (!prefs.onboarded && !window.location.pathname.includes("onboarding.html")) {
     window.location.href = "onboarding.html";
     return;
-  }
-
-  if (typeof Pi !== "undefined") {
-    try {
-      Pi.init({ version: "2.0", sandbox: false });
-    } catch (err) {
-      console.error("Pi SDK initialization failed:", err);
-    }
   }
 
   const langYou = document.getElementById("langYou");
@@ -98,6 +139,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const activeBtn = document.querySelector(`.btn--plan[data-plan="${prefs.activePlan}"]`);
     if (activeBtn) activeBtn.textContent = "Subscribed ✓";
   }
+
+  // Auto-trigger Pi authentication on load (silent — no alert if unavailable/declined)
+  signInWithPi({ silent: true });
 });
 
 const tryDemoBtn = document.getElementById("tryDemoBtn");
@@ -166,7 +210,6 @@ async function stopRecording(e) {
   micBtn.classList.remove("recording");
   setStatus("Translating…", "#9B5CE0");
 
-  // Small delay so the final onresult event has time to land
   setTimeout(async () => {
     const text = recognizedText.trim();
 
@@ -230,42 +273,63 @@ if (clearBtn) {
 }
 
 // ---- Pi Authentication ----
+// Per Pi Network's integration requirements: Pi.init() is awaited as a
+// Promise before Pi.authenticate() runs, the "username" scope is used for
+// general sign-in, and the access token is validated (ideally server-side)
+// before a session is established.
 function onIncompletePaymentFound(payment) {
   console.log("Incomplete payment found:", payment);
 }
 
-async function signInWithPi() {
+async function signInWithPi({ silent = false } = {}) {
   if (typeof Pi === "undefined") {
-    alert("Open this app inside the Pi Browser to sign in with Pi.");
+    if (!silent) alert("Open this app inside the Pi Browser to sign in with Pi.");
     return null;
   }
   try {
-    const scopes = ["username", "payments"];
-    const auth = await Pi.authenticate(scopes, onIncompletePaymentFound);
+    await ensurePiInit();
+    const auth = await Pi.authenticate(["username"], onIncompletePaymentFound);
+
+    // Validate the token BEFORE treating the user as signed in.
+    await validateWithBackend(auth.accessToken);
+
     currentUser = auth.user;
     if (authBtn) authBtn.textContent = `Hi, ${auth.user.username}`;
     return auth.user;
   } catch (err) {
     console.error("Pi authentication failed:", err);
-    alert("Sign-in failed. Please try again from the Pi Browser.");
+    if (!silent) alert("Sign-in failed. Please try again from the Pi Browser.");
     return null;
   }
 }
 
 if (authBtn) {
-  authBtn.addEventListener("click", signInWithPi);
+  authBtn.addEventListener("click", () => signInWithPi({ silent: false }));
 }
 
-// ---- Subscription payments ----
+// ---- Subscription payments (requires the extra "payments" scope) ----
+async function signInForPayments() {
+  await ensurePiInit();
+  const auth = await Pi.authenticate(["username", "payments"], onIncompletePaymentFound);
+  await validateWithBackend(auth.accessToken);
+  currentUser = auth.user;
+  if (authBtn) authBtn.textContent = `Hi, ${auth.user.username}`;
+  return auth.user;
+}
+
 document.querySelectorAll(".btn--plan").forEach((btn) => {
   btn.addEventListener("click", async () => {
     if (typeof Pi === "undefined") {
       alert("Open this app inside the Pi Browser to subscribe with Pi.");
       return;
     }
-    if (!currentUser) {
-      const user = await signInWithPi();
-      if (!user) return;
+
+    try {
+      await signInForPayments();
+    } catch (err) {
+      console.error("Payment sign-in failed:", err);
+      alert("Sign-in failed. Please try again from the Pi Browser.");
+      return;
     }
 
     const plan = btn.dataset.plan;
