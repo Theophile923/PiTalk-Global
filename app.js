@@ -185,20 +185,26 @@ function startRecording(e) {
   const youLang = LANG_CODES[langYouSel.value] || LANG_CODES["English"];
 
   recognizedText = "";
+  finalTranscript = "";
   recognition = new SpeechRecognitionAPI();
   recognition.lang = youLang.bcp47;
   recognition.interimResults = true;
   recognition.continuous = true;
 
   recognition.onresult = (event) => {
-    let finalText = "";
     let interimText = "";
-    for (let i = 0; i < event.results.length; i++) {
+    // Only walk NEW results since the last event (event.resultIndex),
+    // and append each final chunk exactly once — reprocessing the whole
+    // results array from 0 every time was duplicating/repeating text.
+    for (let i = event.resultIndex; i < event.results.length; i++) {
       const piece = event.results[i][0].transcript;
-      if (event.results[i].isFinal) finalText += piece;
-      else interimText += piece;
+      if (event.results[i].isFinal) {
+        finalTranscript += piece + " ";
+      } else {
+        interimText += piece;
+      }
     }
-    recognizedText = (finalText + " " + interimText).trim();
+    recognizedText = (finalTranscript + interimText).trim();
     transcript.innerHTML = `<p><strong>You:</strong> ${recognizedText}</p>`;
   };
 
