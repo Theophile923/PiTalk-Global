@@ -156,6 +156,20 @@ if (tryDemoBtn) {
 const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let recognizedText = "";
+let speechUnlocked = false;
+
+// Many mobile browsers only allow speechSynthesis.speak() if it has been
+// called at least once directly inside a user gesture (tap). Our real speak()
+// call happens later, after an async translation request, which can be too
+// late for some mobile WebViews (like the one inside Pi Browser) — so we
+// "prime" the speech engine here, synchronously, on the very first tap.
+function unlockSpeechSynthesis() {
+  if (speechUnlocked || !("speechSynthesis" in window)) return;
+  const primer = new SpeechSynthesisUtterance(" ");
+  primer.volume = 0;
+  window.speechSynthesis.speak(primer);
+  speechUnlocked = true;
+}
 
 function startRecording(e) {
   e.preventDefault();
@@ -164,6 +178,8 @@ function startRecording(e) {
     alert("Your browser doesn't support live voice recognition. Please test in Chrome.");
     return;
   }
+
+  unlockSpeechSynthesis();
 
   const langYouSel = document.getElementById("langYou");
   const youLang = LANG_CODES[langYouSel.value] || LANG_CODES["English"];
@@ -269,6 +285,22 @@ if (clearBtn) {
     transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
     clearBtn.style.display = "none";
     setStatus("Ready", "#5EE0A0");
+  });
+}
+
+// ---- Swap "You speak" / "They hear" languages ----
+const swapBtn = document.getElementById("swapBtn");
+if (swapBtn) {
+  swapBtn.addEventListener("click", () => {
+    const langYouSel = document.getElementById("langYou");
+    const langThemSel = document.getElementById("langThem");
+    if (!langYouSel || !langThemSel) return;
+
+    const temp = langYouSel.value;
+    langYouSel.value = langThemSel.value;
+    langThemSel.value = temp;
+
+    savePrefs({ ...loadPrefs(), langYou: langYouSel.value, langThem: langThemSel.value });
   });
 }
 
