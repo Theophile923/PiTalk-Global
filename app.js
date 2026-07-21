@@ -156,6 +156,7 @@ if (tryDemoBtn) {
 const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let recognizedText = "";
+let finalTranscript = "";
 let speechUnlocked = false;
 
 // Many mobile browsers only allow speechSynthesis.speak() if it has been
