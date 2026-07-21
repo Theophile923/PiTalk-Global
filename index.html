@@ -112,12 +112,15 @@
     <div class="phone__transcript" id="transcript">
       <p class="transcript__placeholder">Your live transcript will appear here during a call.</p>
     </div>
-    <button class="btn btn--text btn--clear" id="clearBtn" style="display:none;">Clear conversation</button>
+    <div class="phone__actions">
+      <button class="btn btn--text btn--clear" id="clearBtn" style="display:none;">Clear conversation</button>
+      <button class="btn btn--text btn--end" id="endBtn" style="display:none;">End conversation (FIN)</button>
+    </div>
 
-    <button class="mic-btn" id="micBtn" aria-label="Push to talk">
+    <button class="mic-btn" id="micBtn" aria-label="Tap to start or pause listening">
       <span class="mic-icon"></span>
     </button>
-    <p class="mic-hint">Hold to talk — real speech recognition (Chrome)</p>
+    <p class="mic-hint" id="micHint">Tap to start talking</p>
   </div>
 </section>
 
