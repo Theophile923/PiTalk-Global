@@ -166,6 +166,7 @@ const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechReco
 let recognition = null;
 let recognizedText = "";
 let finalTranscript = "";
+let isHolding = false;
 let speechUnlocked = false;
 
 // Many mobile browsers only allow speechSynthesis.speak() if it has been
@@ -196,20 +197,35 @@ function startRecording(e) {
 
   recognizedText = "";
   finalTranscript = "";
+  isHolding = true;
+
+  startRecognitionSession(youLang.bcp47);
+
+  micBtn.classList.add("recording");
+  setStatus("Listening…", "#F5C36B");
+  transcript.innerHTML = `<p class="transcript__placeholder">Listening… speak now.</p>`;
+}
+
+// Chrome's "continuous" mode silently restarts its internal session every so
+// often, resetting result indices to 0 — our old accumulator kept appending
+// on top of that, causing text to repeat and grow. Instead, we run short
+// single-utterance sessions (continuous: false) and explicitly restart them
+// ourselves on `onend` while the button is still held, appending each
+// session's final text exactly once.
+function startRecognitionSession(bcp47Lang) {
   recognition = new SpeechRecognitionAPI();
-  recognition.lang = youLang.bcp47;
+  recognition.lang = bcp47Lang;
   recognition.interimResults = true;
-  recognition.continuous = true;
+  recognition.continuous = false;
 
   recognition.onresult = (event) => {
     let interimText = "";
-    // Only walk NEW results since the last event (event.resultIndex),
-    // and append each final chunk exactly once — reprocessing the whole
-    // results array from 0 every time was duplicating/repeating text.
-    for (let i = event.resultIndex; i < event.results.length; i++) {
+    for (let i = 0; i < event.results.length; i++) {
       const piece = event.results[i][0].transcript;
       if (event.results[i].isFinal) {
-        finalTranscript += piece + " ";
+        if (!finalTranscript.endsWith(piece.trim())) {
+          finalTranscript += piece + " ";
+        }
       } else {
         interimText += piece;
       }
@@ -222,22 +238,25 @@ function startRecording(e) {
     console.error("Speech recognition error:", event.error);
   };
 
+  recognition.onend = () => {
+    if (isHolding) {
+      // Button is still held — start a fresh session to keep listening.
+      startRecognitionSession(bcp47Lang);
+    }
+  };
+
   try {
     recognition.start();
   } catch (err) {
     console.error("Could not start recognition:", err);
-    return;
   }
-
-  micBtn.classList.add("recording");
-  setStatus("Listening…", "#F5C36B");
-  transcript.innerHTML = `<p class="transcript__placeholder">Listening… speak now.</p>`;
 }
 
 async function stopRecording(e) {
   if (e) e.preventDefault();
   if (!recognition) return;
 
+  isHolding = false;
   recognition.stop();
   micBtn.classList.remove("recording");
   setStatus("Translating…", "#9B5CE0");
