@@ -163,10 +163,12 @@ if (tryDemoBtn) {
 
 // ---- Real speech recognition -> translation -> spoken output ----
 const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+const endBtn = document.getElementById("endBtn");
+const micHint = document.getElementById("micHint");
 let recognition = null;
 let recognizedText = "";
 let finalTranscript = "";
-let isHolding = false;
+let micState = "idle"; // idle | listening | paused
 let speechUnlocked = false;
 
 // Many mobile browsers only allow speechSynthesis.speak() if it has been
@@ -182,36 +184,12 @@ function unlockSpeechSynthesis() {
   speechUnlocked = true;
 }
 
-function startRecording(e) {
-  e.preventDefault();
-
-  if (!SpeechRecognitionAPI) {
-    alert("Your browser doesn't support live voice recognition. Please test in Chrome.");
-    return;
-  }
-
-  unlockSpeechSynthesis();
-
-  const langYouSel = document.getElementById("langYou");
-  const youLang = LANG_CODES[langYouSel.value] || LANG_CODES["English"];
-
-  recognizedText = "";
-  finalTranscript = "";
-  isHolding = true;
-
-  startRecognitionSession(youLang.bcp47);
-
-  micBtn.classList.add("recording");
-  setStatus("Listening…", "#F5C36B");
-  transcript.innerHTML = `<p class="transcript__placeholder">Listening… speak now.</p>`;
-}
-
 // Chrome's "continuous" mode silently restarts its internal session every so
-// often, resetting result indices to 0 — our old accumulator kept appending
-// on top of that, causing text to repeat and grow. Instead, we run short
-// single-utterance sessions (continuous: false) and explicitly restart them
-// ourselves on `onend` while the button is still held, appending each
-// session's final text exactly once.
+// often, resetting result indices to 0 — accumulating on top of that caused
+// text to repeat and grow. Instead, we run short single-utterance sessions
+// (continuous: false) and explicitly restart them ourselves on `onend` while
+// we're still in the "listening" state, appending each session's final text
+// exactly once. Tapping pauses this cleanly; a separate End button finalizes.
 function startRecognitionSession(bcp47Lang) {
   recognition = new SpeechRecognitionAPI();
   recognition.lang = bcp47Lang;
@@ -239,8 +217,8 @@ function startRecognitionSession(bcp47Lang) {
   };
 
   recognition.onend = () => {
-    if (isHolding) {
-      // Button is still held — start a fresh session to keep listening.
+    if (micState === "listening") {
+      // Still in listening state — start a fresh session to keep going.
       startRecognitionSession(bcp47Lang);
     }
   };
@@ -252,82 +230,126 @@ function startRecognitionSession(bcp47Lang) {
   }
 }
 
-async function stopRecording(e) {
-  if (e) e.preventDefault();
-  if (!recognition) return;
+function startListening() {
+  if (!SpeechRecognitionAPI) {
+    alert("Your browser doesn't support live voice recognition. Please test in Chrome.");
+    return;
+  }
 
-  isHolding = false;
-  recognition.stop();
+  unlockSpeechSynthesis();
+
+  const langYouSel = document.getElementById("langYou");
+  const youLang = LANG_CODES[langYouSel.value] || LANG_CODES["English"];
+
+  micState = "listening";
+  startRecognitionSession(youLang.bcp47);
+
+  micBtn.classList.add("recording");
+  micBtn.classList.remove("paused");
+  setStatus("Listening…", "#F5C36B");
+  if (micHint) micHint.textContent = "Tap to pause";
+  if (endBtn) endBtn.style.display = "inline-block";
+  if (!finalTranscript) {
+    transcript.innerHTML = `<p class="transcript__placeholder">Listening… speak now.</p>`;
+  }
+}
+
+function pauseListening() {
+  micState = "paused";
+  if (recognition) recognition.stop();
+
   micBtn.classList.remove("recording");
+  micBtn.classList.add("paused");
+  setStatus("Paused", "#9B5CE0");
+  if (micHint) micHint.textContent = "Tap to resume · End when done";
+}
+
+function handleMicTap(e) {
+  e.preventDefault();
+  if (micState === "idle" || micState === "paused") {
+    startListening();
+  } else if (micState === "listening") {
+    pauseListening();
+  }
+}
+
+async function endConversation() {
+  micState = "idle";
+  if (recognition) recognition.stop();
+  micBtn.classList.remove("recording", "paused");
+  if (endBtn) endBtn.style.display = "none";
+  if (micHint) micHint.textContent = "Tap to start talking";
+
+  // Collapse immediate word repeats (e.g. "alors alors" -> "alors") — some
+  // browsers finalize the same short word twice at a pause.
+  const text = finalTranscript.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
+  finalTranscript = "";
+  recognizedText = "";
+
+  if (!text) {
+    setStatus("Ready", "#5EE0A0");
+    transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
+    return;
+  }
+
   setStatus("Translating…", "#9B5CE0");
 
-  setTimeout(async () => {
-    // Collapse immediate word repeats (e.g. "alors alors" -> "alors") —
-    // some browsers finalize the same short word twice at a pause.
-    const text = recognizedText.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
+  const langYouSel = document.getElementById("langYou");
+  const langThemSel = document.getElementById("langThem");
+  const sourceLang = (LANG_CODES[langYouSel.value] || LANG_CODES["English"]).iso;
+  const targetLangObj = LANG_CODES[langThemSel.value] || LANG_CODES["French"];
+  const targetLang = targetLangObj.iso;
 
-    if (!text) {
-      setStatus("Ready", "#5EE0A0");
-      transcript.innerHTML = `<p class="transcript__placeholder">Didn't catch that — hold the button and try again.</p>`;
-      return;
+  try {
+    const params = new URLSearchParams({
+      q: text.slice(0, 500),
+      langpair: `${sourceLang}|${targetLang}`,
+    });
+    const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
+    const data = await res.json();
+
+    if (data.responseStatus !== 200 || !data.responseData) {
+      throw new Error(data.responseDetails || "Translation failed");
     }
+    const translated = data.responseData.translatedText;
 
-    const langYouSel = document.getElementById("langYou");
-    const langThemSel = document.getElementById("langThem");
-    const sourceLang = (LANG_CODES[langYouSel.value] || LANG_CODES["English"]).iso;
-    const targetLangObj = LANG_CODES[langThemSel.value] || LANG_CODES["French"];
-    const targetLang = targetLangObj.iso;
+    setStatus("Speaking output…", "#5EE0A0");
+    transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#F5C36B;"><strong>Translation:</strong> ${translated}</p><p style="margin-top:.6rem;color:rgba(255,255,255,.4);font-size:.78rem;letter-spacing:.05em;">— END / FIN —</p>`;
+    if (clearBtn) clearBtn.style.display = "inline-block";
 
-    try {
-      const params = new URLSearchParams({
-        q: text.slice(0, 500),
-        langpair: `${sourceLang}|${targetLang}`,
-      });
-      const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
-      const data = await res.json();
+    if ("speechSynthesis" in window) {
+      const voices = window.speechSynthesis.getVoices();
+      const targetPrefix = targetLangObj.bcp47.split("-")[0].toLowerCase();
+      const matchingVoice = voices.find(
+        (v) => v.lang && v.lang.toLowerCase().startsWith(targetPrefix)
+      );
 
-      if (data.responseStatus !== 200 || !data.responseData) {
-        throw new Error(data.responseDetails || "Translation failed");
+      if (matchingVoice || voices.length === 0) {
+        const utter = new SpeechSynthesisUtterance(translated);
+        utter.lang = targetLangObj.bcp47;
+        utter.rate = 0.88;
+        if (matchingVoice) utter.voice = matchingVoice;
+        window.speechSynthesis.speak(utter);
+      } else {
+        transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 No ${langThemSel.value} voice installed on this device — text translation only.</p>`;
       }
-      const translated = data.responseData.translatedText;
-
-      setStatus("Speaking output…", "#5EE0A0");
-      transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#F5C36B;"><strong>Translation:</strong> ${translated}</p>`;
-      if (clearBtn) clearBtn.style.display = "inline-block";
-
-      if ("speechSynthesis" in window) {
-        const voices = window.speechSynthesis.getVoices();
-        const targetPrefix = targetLangObj.bcp47.split("-")[0].toLowerCase();
-        const matchingVoice = voices.find(
-          (v) => v.lang && v.lang.toLowerCase().startsWith(targetPrefix)
-        );
-
-        if (matchingVoice || voices.length === 0) {
-          // If the voice list hasn't loaded yet (voices.length === 0), still
-          // try — most browsers resolve this fine once speech actually starts.
-          const utter = new SpeechSynthesisUtterance(translated);
-          utter.lang = targetLangObj.bcp47;
-          if (matchingVoice) utter.voice = matchingVoice;
-          window.speechSynthesis.speak(utter);
-        } else {
-          transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 No ${langThemSel.value} voice installed on this device — text translation only.</p>`;
-        }
-      }
-    } catch (err) {
-      console.error("Translation request failed:", err);
-      transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#E8546B;">Translation service unavailable right now — try again in a moment.</p>`;
     }
+  } catch (err) {
+    console.error("Translation request failed:", err);
+    transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#E8546B;">Translation service unavailable right now — try again in a moment.</p>`;
+  }
 
-    setTimeout(() => setStatus("Ready", "#5EE0A0"), 500);
-  }, 400);
+  setTimeout(() => setStatus("Ready", "#5EE0A0"), 500);
 }
 
 if (micBtn) {
-  micBtn.addEventListener("mousedown", startRecording);
-  micBtn.addEventListener("touchstart", startRecording, { passive: false });
-  micBtn.addEventListener("mouseup", stopRecording);
-  micBtn.addEventListener("mouseleave", stopRecording);
-  micBtn.addEventListener("touchend", stopRecording, { passive: false });
+  micBtn.addEventListener("click", handleMicTap);
+}
+if (endBtn) {
+  endBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    endConversation();
+  });
 }
 
 if (clearBtn) {
