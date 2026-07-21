@@ -234,7 +234,9 @@ async function stopRecording(e) {
   setStatus("Translating…", "#9B5CE0");
 
   setTimeout(async () => {
-    const text = recognizedText.trim();
+    // Collapse immediate word repeats (e.g. "alors alors" -> "alors") —
+    // some browsers finalize the same short word twice at a pause.
+    const text = recognizedText.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
 
     if (!text) {
       setStatus("Ready", "#5EE0A0");
@@ -266,9 +268,22 @@ async function stopRecording(e) {
       if (clearBtn) clearBtn.style.display = "inline-block";
 
       if ("speechSynthesis" in window) {
-        const utter = new SpeechSynthesisUtterance(translated);
-        utter.lang = targetLangObj.bcp47;
-        window.speechSynthesis.speak(utter);
+        const voices = window.speechSynthesis.getVoices();
+        const targetPrefix = targetLangObj.bcp47.split("-")[0].toLowerCase();
+        const matchingVoice = voices.find(
+          (v) => v.lang && v.lang.toLowerCase().startsWith(targetPrefix)
+        );
+
+        if (matchingVoice || voices.length === 0) {
+          // If the voice list hasn't loaded yet (voices.length === 0), still
+          // try — most browsers resolve this fine once speech actually starts.
+          const utter = new SpeechSynthesisUtterance(translated);
+          utter.lang = targetLangObj.bcp47;
+          if (matchingVoice) utter.voice = matchingVoice;
+          window.speechSynthesis.speak(utter);
+        } else {
+          transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 No ${langThemSel.value} voice installed on this device — text translation only.</p>`;
+        }
       }
     } catch (err) {
       console.error("Translation request failed:", err);
