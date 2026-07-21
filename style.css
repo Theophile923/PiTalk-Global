@@ -219,6 +219,13 @@ img{max-width:100%;display:block;}
   padding:0.3rem;margin-bottom:0.75rem;text-decoration:underline;
 }
 .btn--clear:hover{color:#fff;}
+.phone__actions{display:flex;justify-content:center;gap:1.25rem;flex-wrap:wrap;}
+.btn--end{
+  color:var(--gold);font-size:0.78rem;
+  padding:0.3rem;margin-bottom:0.75rem;text-decoration:underline;font-weight:600;
+}
+.btn--end:hover{color:#fff;}
+.mic-btn.paused{background:linear-gradient(135deg,#9B5CE0,#7C2EBF);box-shadow:0 0 0 4px rgba(155,92,224,.3);}
 
 /* ===== LANGUAGES ===== */
 .lang-grid{
