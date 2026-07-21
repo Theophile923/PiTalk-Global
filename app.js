@@ -161,7 +161,39 @@ if (tryDemoBtn) {
   });
 }
 
-// ---- Real speech recognition -> translation -> spoken output ----
+// MyMemory truncates/rejects long queries, so split into sentence-sized
+// chunks and translate each in turn — this avoids ever cutting off mid-
+// sentence on longer conversations (multiple speak/pause turns before End).
+async function translateLongText(text, sourceLang, targetLang) {
+  const sentences = text.match(/[^.!?]+[.!?]*(\s+|$)/g) || [text];
+  const chunks = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    if ((current + sentence).length > 450 && current) {
+      chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current += sentence;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+
+  const translatedParts = [];
+  for (const chunk of chunks) {
+    const params = new URLSearchParams({
+      q: chunk.slice(0, 500),
+      langpair: `${sourceLang}|${targetLang}`,
+    });
+    const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
+    const data = await res.json();
+    if (data.responseStatus !== 200 || !data.responseData) {
+      throw new Error(data.responseDetails || "Translation failed");
+    }
+    translatedParts.push(data.responseData.translatedText);
+  }
+  return translatedParts.join(" ");
+}
 const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
 const endBtn = document.getElementById("endBtn");
 const micHint = document.getElementById("micHint");
@@ -301,17 +333,7 @@ async function endConversation() {
   const targetLang = targetLangObj.iso;
 
   try {
-    const params = new URLSearchParams({
-      q: text.slice(0, 500),
-      langpair: `${sourceLang}|${targetLang}`,
-    });
-    const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
-    const data = await res.json();
-
-    if (data.responseStatus !== 200 || !data.responseData) {
-      throw new Error(data.responseDetails || "Translation failed");
-    }
-    const translated = data.responseData.translatedText;
+    const translated = await translateLongText(text, sourceLang, targetLang);
 
     setStatus("Speaking output…", "#5EE0A0");
     transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#F5C36B;"><strong>Translation:</strong> ${translated}</p><p style="margin-top:.6rem;color:rgba(255,255,255,.4);font-size:.78rem;letter-spacing:.05em;">— END / FIN —</p>`;
