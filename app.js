@@ -69,6 +69,15 @@ function setStatus(text, color) {
   if (statusDot) statusDot.style.background = color;
 }
 
+// Wrap a promise so it fails loudly instead of hanging forever — outside the
+// real Pi Browser, Pi.authenticate() can sit unresolved with no error at all.
+function withTimeout(promise, ms, timeoutMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMessage)), ms)),
+  ]);
+}
+
 // ---- Pi SDK init, treated as a Promise so callers can fully await it ----
 function ensurePiInit() {
   if (piInitPromise) return piInitPromise;
@@ -341,8 +350,12 @@ async function signInWithPi({ silent = false } = {}) {
     return null;
   }
   try {
-    await ensurePiInit();
-    const auth = await Pi.authenticate(["username"], onIncompletePaymentFound);
+    await withTimeout(ensurePiInit(), 6000, "Pi SDK init timed out — not running inside the Pi Browser.");
+    const auth = await withTimeout(
+      Pi.authenticate(["username"], onIncompletePaymentFound),
+      10000,
+      "Pi sign-in timed out — this only works inside the real Pi Browser."
+    );
 
     // Validate the token BEFORE treating the user as signed in.
     await validateWithBackend(auth.accessToken);
@@ -352,7 +365,7 @@ async function signInWithPi({ silent = false } = {}) {
     return auth.user;
   } catch (err) {
     console.error("Pi authentication failed:", err);
-    if (!silent) alert("Sign-in failed. Please try again from the Pi Browser.");
+    if (!silent) alert("Sign-in didn't complete. Open this app inside the real Pi Browser and try again.");
     return null;
   }
 }
@@ -363,8 +376,12 @@ if (authBtn) {
 
 // ---- Subscription payments (requires the extra "payments" scope) ----
 async function signInForPayments() {
-  await ensurePiInit();
-  const auth = await Pi.authenticate(["username", "payments"], onIncompletePaymentFound);
+  await withTimeout(ensurePiInit(), 6000, "Pi SDK init timed out — not running inside the Pi Browser.");
+  const auth = await withTimeout(
+    Pi.authenticate(["username", "payments"], onIncompletePaymentFound),
+    10000,
+    "Pi sign-in timed out — this only works inside the real Pi Browser."
+  );
   await validateWithBackend(auth.accessToken);
   currentUser = auth.user;
   if (authBtn) authBtn.textContent = `Hi, ${auth.user.username}`;
