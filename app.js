@@ -161,24 +161,29 @@ if (tryDemoBtn) {
   });
 }
 
-// Real spoken output via a cloud TTS engine (Puter.js — free, no key, works
-// on any device since it returns an actual audio file to play, unlike the
-// browser's speechSynthesis which depends on a voice engine being installed
-// on the device — something the Pi Browser's WebView often lacks).
+// Real spoken output via a free TTS endpoint (StreamElements — no account, no
+// key, no sign-in required for the end user) that returns an actual playable
+// audio file. This avoids depending on the device's own voice engine, which
+// the Pi Browser's WebView often lacks. Note: this is an unofficial, free
+// community endpoint, not a documented paid service — fine for testing, but
+// should be replaced with a proper paid TTS provider before a real launch.
+const STREAMELEMENTS_VOICES = { en: "Joanna", fr: "Celine", zh: "Zhiyu" };
+
 async function speakTranslation(translatedText, targetLangObj) {
-  if (typeof puter !== "undefined" && puter.ai && puter.ai.txt2speech) {
-    try {
-      setStatus("Speaking output…", "#5EE0A0");
-      const audio = await puter.ai.txt2speech(translatedText, targetLangObj.bcp47);
-      await new Promise((resolve) => {
-        audio.onended = resolve;
-        audio.onerror = resolve;
-        audio.play().catch(resolve);
-      });
-      return;
-    } catch (err) {
-      console.error("Cloud speech failed, falling back to device voice:", err);
-    }
+  const voice = STREAMELEMENTS_VOICES[targetLangObj.iso] || "Joanna";
+  const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(translatedText.slice(0, 500))}`;
+
+  try {
+    setStatus("Speaking output…", "#5EE0A0");
+    await new Promise((resolve, reject) => {
+      const audio = new Audio(url);
+      audio.onended = resolve;
+      audio.onerror = reject;
+      audio.play().catch(reject);
+    });
+    return;
+  } catch (err) {
+    console.error("Cloud speech (StreamElements) failed, falling back to device voice:", err);
   }
 
   // Fallback: the device/browser's own voice engine, if it has one.
