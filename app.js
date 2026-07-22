@@ -175,10 +175,26 @@ async function speakTranslation(translatedText, targetLangObj) {
 
   try {
     setStatus("Speaking output…", "#5EE0A0");
+    // Fetch the audio bytes ourselves (like our translation requests already
+    // do successfully) instead of pointing <audio> straight at the remote
+    // URL — some WebViews (Pi Browser included, it seems) restrict direct
+    // JS-initiated cross-origin media loads even though a plain page
+    // navigation to the same URL works fine.
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Speech request failed: ${res.status}`);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+
     await new Promise((resolve, reject) => {
-      const audio = new Audio(url);
-      audio.onended = resolve;
-      audio.onerror = reject;
+      const audio = new Audio(blobUrl);
+      audio.onended = () => {
+        URL.revokeObjectURL(blobUrl);
+        resolve();
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(blobUrl);
+        reject(new Error("Blob audio playback failed"));
+      };
       audio.play().catch(reject);
     });
     return;
