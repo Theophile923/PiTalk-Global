@@ -351,6 +351,14 @@ async function endConversation() {
         utter.lang = targetLangObj.bcp47;
         utter.rate = 0.88;
         if (matchingVoice) utter.voice = matchingVoice;
+
+        // Some WebViews (e.g. inside Pi Browser, if the device has no TTS
+        // engine configured) accept speak() but never actually produce sound,
+        // and fail silently. Surface that instead of leaving the user guessing.
+        utter.onerror = () => {
+          transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 Spoken playback isn't available on this device right now — showing translation as text only. Check your device's Text-to-Speech settings.</p>`;
+        };
+
         window.speechSynthesis.speak(utter);
       } else {
         transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 No ${langThemSel.value} voice installed on this device — text translation only.</p>`;
