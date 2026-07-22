@@ -268,6 +268,22 @@ function unlockSpeechSynthesis() {
   speechUnlocked = true;
 }
 
+let audioUnlocked = false;
+// Same idea as unlockSpeechSynthesis, but for <audio>/StreamElements playback:
+// many browsers only allow audio.play() when it's directly tied to a user
+// gesture. Our real playback happens after an async translation request,
+// which is too late — so we "unlock" it here with a silent clip, played
+// synchronously inside the very first tap (like YouTube's one-time "unmute").
+function unlockAudioPlayback() {
+  if (audioUnlocked) return;
+  const silence = new Audio(
+    "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
+  );
+  silence.volume = 0.01;
+  silence.play().catch(() => {});
+  audioUnlocked = true;
+}
+
 // Chrome's "continuous" mode silently restarts its internal session every so
 // often, resetting result indices to 0 — accumulating on top of that caused
 // text to repeat and grow. Instead, we run short single-utterance sessions
@@ -321,6 +337,7 @@ function startListening() {
   }
 
   unlockSpeechSynthesis();
+  unlockAudioPlayback();
 
   const langYouSel = document.getElementById("langYou");
   const youLang = LANG_CODES[langYouSel.value] || LANG_CODES["English"];
