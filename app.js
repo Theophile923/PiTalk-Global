@@ -161,6 +161,53 @@ if (tryDemoBtn) {
   });
 }
 
+// Real spoken output via a cloud TTS engine (Puter.js — free, no key, works
+// on any device since it returns an actual audio file to play, unlike the
+// browser's speechSynthesis which depends on a voice engine being installed
+// on the device — something the Pi Browser's WebView often lacks).
+async function speakTranslation(translatedText, targetLangObj) {
+  if (typeof puter !== "undefined" && puter.ai && puter.ai.txt2speech) {
+    try {
+      setStatus("Speaking output…", "#5EE0A0");
+      const audio = await puter.ai.txt2speech(translatedText, targetLangObj.bcp47);
+      await new Promise((resolve) => {
+        audio.onended = resolve;
+        audio.onerror = resolve;
+        audio.play().catch(resolve);
+      });
+      return;
+    } catch (err) {
+      console.error("Cloud speech failed, falling back to device voice:", err);
+    }
+  }
+
+  // Fallback: the device/browser's own voice engine, if it has one.
+  if ("speechSynthesis" in window) {
+    const voices = window.speechSynthesis.getVoices();
+    const targetPrefix = targetLangObj.bcp47.split("-")[0].toLowerCase();
+    const matchingVoice = voices.find(
+      (v) => v.lang && v.lang.toLowerCase().startsWith(targetPrefix)
+    );
+
+    await new Promise((resolve) => {
+      const utter = new SpeechSynthesisUtterance(translatedText);
+      utter.lang = targetLangObj.bcp47;
+      utter.rate = 0.88;
+      if (matchingVoice) utter.voice = matchingVoice;
+      utter.onstart = () => setStatus("Speaking output…", "#5EE0A0");
+      utter.onend = resolve;
+      utter.onerror = () => {
+        transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 Spoken playback isn't available right now — showing translation as text only.</p>`;
+        resolve();
+      };
+      window.speechSynthesis.speak(utter);
+      setTimeout(resolve, 5000); // safety net if neither event ever fires
+    });
+  } else {
+    transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 No spoken playback available on this device — text translation only.</p>`;
+  }
+}
+
 // MyMemory truncates/rejects long queries, so split into sentence-sized
 // chunks and translate each in turn — this avoids ever cutting off mid-
 // sentence on longer conversations (multiple speak/pause turns before End).
@@ -335,41 +382,17 @@ async function endConversation() {
   try {
     const translated = await translateLongText(text, sourceLang, targetLang);
 
-    setStatus("Speaking output…", "#5EE0A0");
     transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#F5C36B;"><strong>Translation:</strong> ${translated}</p><p style="margin-top:.6rem;color:rgba(255,255,255,.4);font-size:.78rem;letter-spacing:.05em;">— END / FIN —</p>`;
     if (clearBtn) clearBtn.style.display = "inline-block";
 
-    if ("speechSynthesis" in window) {
-      const voices = window.speechSynthesis.getVoices();
-      const targetPrefix = targetLangObj.bcp47.split("-")[0].toLowerCase();
-      const matchingVoice = voices.find(
-        (v) => v.lang && v.lang.toLowerCase().startsWith(targetPrefix)
-      );
-
-      if (matchingVoice || voices.length === 0) {
-        const utter = new SpeechSynthesisUtterance(translated);
-        utter.lang = targetLangObj.bcp47;
-        utter.rate = 0.88;
-        if (matchingVoice) utter.voice = matchingVoice;
-
-        // Some WebViews (e.g. inside Pi Browser, if the device has no TTS
-        // engine configured) accept speak() but never actually produce sound,
-        // and fail silently. Surface that instead of leaving the user guessing.
-        utter.onerror = () => {
-          transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 Spoken playback isn't available on this device right now — showing translation as text only. Check your device's Text-to-Speech settings.</p>`;
-        };
-
-        window.speechSynthesis.speak(utter);
-      } else {
-        transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 No ${langThemSel.value} voice installed on this device — text translation only.</p>`;
-      }
-    }
+    setStatus("Sending to speaker…", "#9B5CE0");
+    await speakTranslation(translated, targetLangObj);
+    setStatus("Ready", "#5EE0A0");
   } catch (err) {
     console.error("Translation request failed:", err);
     transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#E8546B;">Translation service unavailable right now — try again in a moment.</p>`;
+    setStatus("Ready", "#5EE0A0");
   }
-
-  setTimeout(() => setStatus("Ready", "#5EE0A0"), 500);
 }
 
 if (micBtn) {
