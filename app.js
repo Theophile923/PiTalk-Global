@@ -87,7 +87,7 @@ function ensurePiInit() {
       return;
     }
     try {
-      const result = Pi.init({ version: "2.0", sandbox: false });
+      const result = Pi.init({ version: "2.0", sandbox: true }); // Testnet — matches this app's Developer Portal registration
       // Pi.init may or may not return a promise depending on SDK version — support both.
       Promise.resolve(result).then(resolve).catch(resolve);
     } catch (err) {
