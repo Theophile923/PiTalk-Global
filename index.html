@@ -10,6 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css" />
 <script src="https://sdk.minepi.com/pi-sdk.js"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 </head>
 <body>
 
@@ -89,6 +90,22 @@
       <span class="dot"></span> <span id="phoneStatusText">Ready</span>
     </div>
 
+    <div class="phone__connect" id="connectPanel">
+      <p class="connect-status" id="connectStatus">Solo demo — not connected to another pioneer</p>
+      <div class="connect-tabs" id="connectTabs">
+        <button class="btn btn--connect" id="startCallBtn" type="button">Start a call</button>
+        <button class="btn btn--connect" id="joinCallBtn" type="button">Join a call</button>
+      </div>
+      <div class="connect-join" id="joinCodeRow" style="display:none;">
+        <input type="text" id="roomCodeInput" placeholder="Enter code, e.g. PT-4X9K" />
+        <button class="btn btn--primary" id="connectBtn" type="button">Connect</button>
+      </div>
+      <div class="connect-code" id="roomCodeDisplay" style="display:none;">
+        <p>Share this code with your fellow pioneer:</p>
+        <p class="room-code" id="roomCodeText">—</p>
+      </div>
+    </div>
+
     <div class="phone__langs">
       <div class="lang-select">
         <label>You speak</label>
@@ -121,6 +138,7 @@
       <span class="mic-icon"></span>
     </button>
     <p class="mic-hint" id="micHint">Tap to start talking</p>
+    <audio id="remoteAudio" autoplay style="display:none;"></audio>
   </div>
 </section>
 
