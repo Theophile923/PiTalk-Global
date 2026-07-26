@@ -24,6 +24,123 @@
    ============================================================ */
 
 const STORAGE_KEY = "pitalk_prefs_v1";
+
+// ============================================================
+// Peer-to-peer connection between two pioneers (PeerJS, free
+// public broker, no account needed for the host or the joiner).
+// Real voice goes directly between devices (WebRTC audio); each
+// side's translated text is also sent over a data channel and
+// shown as a caption, so translation doesn't depend on TTS.
+// ============================================================
+let peerConn = null;
+let activeCall = null;
+let dataConn = null;
+let localCallStream = null;
+let isCallHost = false;
+
+function generateRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous chars
+  let code = "";
+  for (let i = 0; i < 4; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+function setConnectStatus(text, connected) {
+  const el = document.getElementById("connectStatus");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle("connected", !!connected);
+}
+
+function setupCallEvents() {
+  activeCall.on("stream", (remoteStream) => {
+    const remoteAudio = document.getElementById("remoteAudio");
+    remoteAudio.srcObject = remoteStream;
+    remoteAudio.play().catch(() => {});
+    setConnectStatus("Connected — you can talk now", true);
+  });
+  activeCall.on("close", () => setConnectStatus("Call ended", false));
+  activeCall.on("error", (err) => console.error("Call error:", err));
+}
+
+function setupDataConnEvents() {
+  dataConn.on("data", (data) => {
+    transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data}</p>`;
+  });
+  dataConn.on("error", (err) => console.error("Data channel error:", err));
+}
+
+async function startCall() {
+  if (typeof Peer === "undefined") {
+    alert("Calling isn't available right now — please reload the page.");
+    return;
+  }
+  try {
+    localCallStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    alert("Microphone access is needed to start a call.");
+    return;
+  }
+
+  const code = generateRoomCode();
+  const fullId = "pitalkglobal-" + code;
+  isCallHost = true;
+  peerConn = new Peer(fullId);
+
+  peerConn.on("open", () => {
+    document.getElementById("roomCodeText").textContent = code;
+    document.getElementById("roomCodeDisplay").style.display = "block";
+    setConnectStatus("Waiting for the other pioneer to join…", false);
+  });
+
+  peerConn.on("call", (incomingCall) => {
+    incomingCall.answer(localCallStream);
+    activeCall = incomingCall;
+    setupCallEvents();
+  });
+
+  peerConn.on("connection", (conn) => {
+    dataConn = conn;
+    setupDataConnEvents();
+  });
+
+  peerConn.on("error", (err) => {
+    console.error("Peer error:", err);
+    setConnectStatus("Connection error — try again.", false);
+  });
+}
+
+async function joinCall(rawCode) {
+  if (typeof Peer === "undefined") {
+    alert("Calling isn't available right now — please reload the page.");
+    return;
+  }
+  try {
+    localCallStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    alert("Microphone access is needed to join a call.");
+    return;
+  }
+
+  const fullId = "pitalkglobal-" + rawCode.trim().toUpperCase();
+  isCallHost = false;
+  peerConn = new Peer();
+
+  peerConn.on("open", () => {
+    setConnectStatus("Connecting…", false);
+    activeCall = peerConn.call(fullId, localCallStream);
+    setupCallEvents();
+    dataConn = peerConn.connect(fullId);
+    setupDataConnEvents();
+  });
+
+  peerConn.on("error", (err) => {
+    console.error("Peer error:", err);
+    setConnectStatus("Couldn't connect — check the code and try again.", false);
+  });
+}
+
+
 const TRANSLATE_ENDPOINT = "https://api.mymemory.translated.net/get";
 
 // TODO: replace with your real backend once it exists.
@@ -115,6 +232,32 @@ async function validateWithBackend(accessToken) {
   });
   if (!res.ok) throw new Error("Pi token validation failed");
   return res.json();
+}
+
+const startCallBtn = document.getElementById("startCallBtn");
+const joinCallBtn = document.getElementById("joinCallBtn");
+const connectBtn = document.getElementById("connectBtn");
+const joinCodeRow = document.getElementById("joinCodeRow");
+const roomCodeInput = document.getElementById("roomCodeInput");
+
+if (startCallBtn) {
+  startCallBtn.addEventListener("click", () => {
+    startCallBtn.classList.add("active");
+    if (joinCodeRow) joinCodeRow.style.display = "none";
+    startCall();
+  });
+}
+if (joinCallBtn) {
+  joinCallBtn.addEventListener("click", () => {
+    joinCallBtn.classList.add("active");
+    if (joinCodeRow) joinCodeRow.style.display = "flex";
+  });
+}
+if (connectBtn) {
+  connectBtn.addEventListener("click", () => {
+    const code = roomCodeInput ? roomCodeInput.value : "";
+    if (code.trim()) joinCall(code);
+  });
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -422,6 +565,10 @@ async function endConversation() {
 
     transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#F5C36B;"><strong>Translation:</strong> ${translated}</p><p style="margin-top:.6rem;color:rgba(255,255,255,.4);font-size:.78rem;letter-spacing:.05em;">— END / FIN —</p>`;
     if (clearBtn) clearBtn.style.display = "inline-block";
+
+    if (dataConn && dataConn.open) {
+      dataConn.send(translated);
+    }
 
     setStatus("Sending to speaker…", "#9B5CE0");
     await speakTranslation(translated, targetLangObj);
