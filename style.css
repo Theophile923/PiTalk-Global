@@ -214,6 +214,34 @@ img{max-width:100%;display:block;}
 .mic-btn:focus-visible{outline:3px solid var(--gold);outline-offset:3px;}
 .mic-icon{width:18px;height:26px;background:#fff;border-radius:9px;display:block;}
 .mic-hint{font-size:0.75rem;color:rgba(255,255,255,.5);margin-top:0.75rem;}
+
+.phone__connect{
+  background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.12);
+  border-radius:14px;padding:1rem;margin-bottom:1.25rem;text-align:center;
+}
+.connect-status{font-size:0.8rem;color:rgba(255,255,255,.6);margin-bottom:0.75rem;}
+.connect-status.connected{color:#5EE0A0;font-weight:600;}
+.connect-tabs{display:flex;gap:0.6rem;justify-content:center;}
+.btn--connect{
+  background:rgba(255,255,255,.08);color:#fff;
+  border:1px solid rgba(255,255,255,.2);
+  padding:0.5rem 1rem;font-size:0.82rem;
+}
+.btn--connect:hover{background:rgba(255,255,255,.16);}
+.btn--connect.active{background:var(--violet);border-color:var(--violet);}
+.connect-join{display:flex;gap:0.5rem;justify-content:center;margin-top:0.85rem;flex-wrap:wrap;}
+.connect-join input{
+  background:rgba(255,255,255,.1);color:#fff;
+  border:1px solid rgba(255,255,255,.25);border-radius:10px;
+  padding:0.5rem 0.7rem;font-size:0.85rem;font-family:inherit;
+  text-transform:uppercase;text-align:center;
+}
+.connect-code{margin-top:0.85rem;}
+.connect-code p{font-size:0.8rem;color:rgba(255,255,255,.6);margin-bottom:0.3rem;}
+.room-code{
+  font-family:var(--font-display);font-size:1.4rem;font-weight:700;
+  letter-spacing:0.1em;color:var(--gold);
+}
 .btn--clear{
   color:rgba(255,255,255,.6);font-size:0.78rem;
   padding:0.3rem;margin-bottom:0.75rem;text-decoration:underline;
