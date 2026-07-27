@@ -45,11 +45,53 @@ function generateRoomCode() {
   return code;
 }
 
+const ROOM_CODE_KEY = "pitalk_room_code_v1";
+const ROOM_CODE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Keep the same room code for a full day, stored locally — otherwise a
+// backgrounded mobile tab getting reloaded (common when switching to
+// WhatsApp/SMS to send the code) would silently generate a brand new one.
+function getOrCreateRoomCode() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ROOM_CODE_KEY) || "null");
+    if (saved && saved.code && Date.now() - saved.createdAt < ROOM_CODE_TTL_MS) {
+      return saved.code;
+    }
+  } catch {}
+  const code = generateRoomCode();
+  localStorage.setItem(ROOM_CODE_KEY, JSON.stringify({ code, createdAt: Date.now() }));
+  return code;
+}
+
 function setConnectStatus(text, connected) {
   const el = document.getElementById("connectStatus");
   if (!el) return;
   el.textContent = text;
   el.classList.toggle("connected", !!connected);
+}
+
+// Generates a short two-tone chime with the Web Audio API — no sound file
+// needed, so it works reliably everywhere (unlike the translated-speech
+// audio, which depends on a network fetch).
+function playChime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    [660, 880].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = freq;
+      osc.type = "sine";
+      gain.gain.setValueAtTime(0.0001, now + i * 0.18);
+      gain.gain.exponentialRampToValueAtTime(0.18, now + i * 0.18 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.18 + 0.18);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + i * 0.18);
+      osc.stop(now + i * 0.18 + 0.2);
+    });
+  } catch (err) {
+    console.error("Chime failed:", err);
+  }
 }
 
 function setupCallEvents() {
@@ -58,6 +100,9 @@ function setupCallEvents() {
     remoteAudio.srcObject = remoteStream;
     remoteAudio.play().catch(() => {});
     setConnectStatus("Connected — you can talk now", true);
+    playChime();
+    const ringBtn = document.getElementById("ringBtn");
+    if (ringBtn) ringBtn.style.display = "inline-block";
   });
   activeCall.on("close", () => setConnectStatus("Call ended", false));
   activeCall.on("error", (err) => console.error("Call error:", err));
@@ -65,9 +110,46 @@ function setupCallEvents() {
 
 function setupDataConnEvents() {
   dataConn.on("data", (data) => {
-    transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data}</p>`;
+    if (data && data.type === "caption") {
+      transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data.text}</p>`;
+    } else if (data && data.type === "ring") {
+      playChime();
+      setConnectStatus("🔔 Your pioneer wants to talk!", true);
+    } else if (data && data.type === "audio" && data.buffer) {
+      try {
+        const blob = new Blob([data.buffer], { type: "audio/mpeg" });
+        const blobUrl = URL.createObjectURL(blob);
+        const audio = new Audio(blobUrl);
+        audio.onended = () => URL.revokeObjectURL(blobUrl);
+        audio.play().catch((err) => console.error("Playback of received translation failed:", err));
+      } catch (err) {
+        console.error("Could not play received translation audio:", err);
+      }
+    } else if (typeof data === "string") {
+      // Backward-compatible fallback for plain-text messages.
+      transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data}</p>`;
+    }
   });
   dataConn.on("error", (err) => console.error("Data channel error:", err));
+}
+
+// Generates the spoken translation audio (StreamElements) and sends it to
+// the connected pioneer over the data channel, so THEY hear the translation
+// in their own language — the live call audio alone only carries your raw
+// voice in your own language.
+async function sendSpokenTranslation(text, targetLangObj) {
+  const voice = STREAMELEMENTS_VOICES[targetLangObj.iso] || "Joanna";
+  const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text.slice(0, 500))}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Speech request failed: ${res.status}`);
+    const buffer = await res.arrayBuffer();
+    if (dataConn && dataConn.open) {
+      dataConn.send({ type: "audio", buffer });
+    }
+  } catch (err) {
+    console.error("Could not generate/send spoken translation:", err);
+  }
 }
 
 async function startCall() {
@@ -82,7 +164,7 @@ async function startCall() {
     return;
   }
 
-  const code = generateRoomCode();
+  const code = getOrCreateRoomCode();
   const fullId = "pitalkglobal-" + code;
   isCallHost = true;
   peerConn = new Peer(fullId);
@@ -91,6 +173,7 @@ async function startCall() {
     document.getElementById("roomCodeText").textContent = code;
     document.getElementById("roomCodeDisplay").style.display = "block";
     setConnectStatus("Waiting for the other pioneer to join…", false);
+    setupShareLinkButton(code);
   });
 
   peerConn.on("call", (incomingCall) => {
@@ -106,7 +189,17 @@ async function startCall() {
 
   peerConn.on("error", (err) => {
     console.error("Peer error:", err);
-    setConnectStatus("Connection error — try again.", false);
+    if (err.type === "unavailable-id") {
+      // A previous session with this same code is still registered
+      // (e.g. this device didn't close cleanly) — show the code anyway
+      // since it's still yours, just note the reconnect.
+      document.getElementById("roomCodeText").textContent = code;
+      document.getElementById("roomCodeDisplay").style.display = "block";
+      setConnectStatus("Reconnecting to your existing room…", false);
+      setupShareLinkButton(code);
+    } else {
+      setConnectStatus("Connection error — try again.", false);
+    }
   });
 }
 
@@ -257,6 +350,58 @@ if (connectBtn) {
   connectBtn.addEventListener("click", () => {
     const code = roomCodeInput ? roomCodeInput.value : "";
     if (code.trim()) joinCall(code);
+  });
+}
+
+function setupShareLinkButton(code) {
+  const shareBtn = document.getElementById("shareLinkBtn");
+  if (!shareBtn) return;
+  const link = `${window.location.origin}${window.location.pathname}?room=${code}`;
+
+  shareBtn.onclick = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: "Join me on PiTalk Global",
+          text: "Tap to join our real-time translated call:",
+          url: link,
+        });
+        return;
+      } catch (err) {
+        // User cancelled the share sheet, or it failed — fall through to copy.
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(link);
+      shareBtn.textContent = "✅ Link copied!";
+      setTimeout(() => (shareBtn.textContent = "📤 Share invite link"), 2000);
+    } catch (err) {
+      alert(`Copy this link:\n${link}`);
+    }
+  };
+}
+
+// If this page was opened via a shared invite link (?room=CODE), jump
+// straight into joining that call instead of showing the start/join menu.
+function checkForInviteLink() {
+  const params = new URLSearchParams(window.location.search);
+  const room = params.get("room");
+  if (room && roomCodeInput && joinCodeRow) {
+    roomCodeInput.value = room;
+    joinCodeRow.style.display = "flex";
+    if (joinCallBtn) joinCallBtn.classList.add("active");
+    joinCall(room);
+  }
+}
+checkForInviteLink();
+
+const ringBtn = document.getElementById("ringBtn");
+if (ringBtn) {
+  ringBtn.addEventListener("click", () => {
+    playChime();
+    if (dataConn && dataConn.open) {
+      dataConn.send({ type: "ring" });
+    }
   });
 }
 
@@ -567,12 +712,18 @@ async function endConversation() {
     if (clearBtn) clearBtn.style.display = "inline-block";
 
     if (dataConn && dataConn.open) {
-      dataConn.send(translated);
+      // In a live call: the translation is meant for the OTHER pioneer to
+      // hear in their language — send the caption and spoken audio to them
+      // instead of playing/showing it only on this device.
+      dataConn.send({ type: "caption", text: translated });
+      setStatus("Sending translation…", "#9B5CE0");
+      await sendSpokenTranslation(translated, targetLangObj);
+      setStatus("Ready", "#5EE0A0");
+    } else {
+      setStatus("Sending to speaker…", "#9B5CE0");
+      await speakTranslation(translated, targetLangObj);
+      setStatus("Ready", "#5EE0A0");
     }
-
-    setStatus("Sending to speaker…", "#9B5CE0");
-    await speakTranslation(translated, targetLangObj);
-    setStatus("Ready", "#5EE0A0");
   } catch (err) {
     console.error("Translation request failed:", err);
     transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#E8546B;">Translation service unavailable right now — try again in a moment.</p>`;
