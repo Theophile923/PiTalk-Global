@@ -104,8 +104,21 @@
         <p>Share this code with your fellow pioneer:</p>
         <p class="room-code" id="roomCodeText">—</p>
         <button class="btn btn--connect" id="shareLinkBtn" type="button">📤 Share invite link</button>
+        <img id="roomQrCode" class="room-qr" alt="QR code to join this call" />
+        <p class="qr-hint">Or scan this QR code</p>
       </div>
       <button class="btn btn--connect" id="ringBtn" type="button" style="display:none;">🔔 Ring your pioneer</button>
+
+      <div class="favorites" id="favoritesPanel">
+        <p class="favorites__title">Saved pioneers</p>
+        <div class="favorites__list" id="favoritesList">
+          <p class="favorites__empty" id="favoritesEmpty">No saved pioneers yet — connect once, then save them below.</p>
+        </div>
+        <div class="favorites__add" id="favoritesAddRow" style="display:none;">
+          <input type="text" id="favoriteNameInput" placeholder="Name this pioneer" />
+          <button class="btn btn--connect" id="saveFavoriteBtn" type="button">💾 Save this contact</button>
+        </div>
+      </div>
     </div>
 
     <div class="phone__langs">
