@@ -174,6 +174,8 @@ async function startCall() {
     document.getElementById("roomCodeDisplay").style.display = "block";
     setConnectStatus("Waiting for the other pioneer to join…", false);
     setupShareLinkButton(code);
+    showRoomQrCode(code);
+    showSaveFavoritePrompt();
   });
 
   peerConn.on("call", (incomingCall) => {
@@ -225,6 +227,7 @@ async function joinCall(rawCode) {
     setupCallEvents();
     dataConn = peerConn.connect(fullId);
     setupDataConnEvents();
+    showSaveFavoritePrompt();
   });
 
   peerConn.on("error", (err) => {
@@ -380,6 +383,95 @@ function setupShareLinkButton(code) {
     }
   };
 }
+
+// Generates a QR code image for the invite link — using a free image API
+// (no library/account needed) so the other pioneer can just scan instead of
+// typing the code, handy when you're together in person.
+function showRoomQrCode(code) {
+  const img = document.getElementById("roomQrCode");
+  if (!img) return;
+  const link = `${window.location.origin}${window.location.pathname}?room=${code}`;
+  img.src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(link)}`;
+}
+
+// ---- Saved pioneers (favorites) ----
+const FAVORITES_KEY = "pitalk_favorites_v1";
+
+function loadFavorites() {
+  try {
+    return JSON.parse(localStorage.getItem(FAVORITES_KEY)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveFavorites(list) {
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify(list));
+}
+
+function renderFavorites() {
+  const list = loadFavorites();
+  const listEl = document.getElementById("favoritesList");
+  const emptyEl = document.getElementById("favoritesEmpty");
+  if (!listEl) return;
+
+  listEl.querySelectorAll(".favorite-item").forEach((el) => el.remove());
+  if (emptyEl) emptyEl.style.display = list.length ? "none" : "block";
+
+  list.forEach((fav) => {
+    const row = document.createElement("div");
+    row.className = "favorite-item";
+    row.innerHTML = `
+      <div>
+        <div class="favorite-item__name">${fav.name}</div>
+        <div class="favorite-item__code">${fav.code}</div>
+      </div>
+      <div class="favorite-item__actions">
+        <button type="button" data-action="call">📞 Call</button>
+        <button type="button" data-action="remove" class="remove">✕</button>
+      </div>
+    `;
+    row.querySelector('[data-action="call"]').addEventListener("click", () => {
+      if (joinCodeRow) joinCodeRow.style.display = "flex";
+      if (roomCodeInput) roomCodeInput.value = fav.code;
+      joinCall(fav.code);
+    });
+    row.querySelector('[data-action="remove"]').addEventListener("click", () => {
+      saveFavorites(loadFavorites().filter((f) => f.code !== fav.code));
+      renderFavorites();
+    });
+    listEl.appendChild(row);
+  });
+}
+
+// Once connected (as host or joiner), offer to save the current contact.
+function showSaveFavoritePrompt() {
+  const row = document.getElementById("favoritesAddRow");
+  if (row) row.style.display = "flex";
+}
+
+function wireFavoriteSaveButton(getCurrentCode) {
+  const saveBtn = document.getElementById("saveFavoriteBtn");
+  const nameInput = document.getElementById("favoriteNameInput");
+  if (!saveBtn) return;
+  saveBtn.addEventListener("click", () => {
+    const code = getCurrentCode();
+    const name = (nameInput && nameInput.value.trim()) || "Pioneer";
+    if (!code) return;
+    const list = loadFavorites().filter((f) => f.code !== code);
+    list.push({ name, code });
+    saveFavorites(list);
+    renderFavorites();
+    if (nameInput) nameInput.value = "";
+  });
+}
+
+renderFavorites();
+wireFavoriteSaveButton(() => {
+  const text = document.getElementById("roomCodeText");
+  if (text && text.textContent && text.textContent !== "—") return text.textContent;
+  return roomCodeInput ? roomCodeInput.value.trim().toUpperCase() : "";
+});
 
 // If this page was opened via a shared invite link (?room=CODE), jump
 // straight into joining that call instead of showing the start/join menu.
