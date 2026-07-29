@@ -46,11 +46,8 @@ function generateRoomCode() {
 }
 
 const ROOM_CODE_KEY = "pitalk_room_code_v1";
-const ROOM_CODE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const ROOM_CODE_TTL_MS = 365 * 24 * 60 * 60 * 1000; // effectively permanent — regenerate manually if lost/leaked
 
-// Keep the same room code for a full day, stored locally — otherwise a
-// backgrounded mobile tab getting reloaded (common when switching to
-// WhatsApp/SMS to send the code) would silently generate a brand new one.
 function getOrCreateRoomCode() {
   try {
     const saved = JSON.parse(localStorage.getItem(ROOM_CODE_KEY) || "null");
@@ -58,6 +55,12 @@ function getOrCreateRoomCode() {
       return saved.code;
     }
   } catch {}
+  const code = generateRoomCode();
+  localStorage.setItem(ROOM_CODE_KEY, JSON.stringify({ code, createdAt: Date.now() }));
+  return code;
+}
+
+function regenerateRoomCode() {
   const code = generateRoomCode();
   localStorage.setItem(ROOM_CODE_KEY, JSON.stringify({ code, createdAt: Date.now() }));
   return code;
@@ -99,10 +102,15 @@ function setupCallEvents() {
     const remoteAudio = document.getElementById("remoteAudio");
     remoteAudio.srcObject = remoteStream;
     remoteAudio.play().catch(() => {});
-    setConnectStatus("Connected — you can talk now", true);
+    setConnectStatus("Connected — just talk, no buttons needed", true);
     playChime();
     const ringBtn = document.getElementById("ringBtn");
     if (ringBtn) ringBtn.style.display = "inline-block";
+    const hangupBtn = document.getElementById("hangupBtn");
+    if (hangupBtn) hangupBtn.style.display = "block";
+    // Phone-call feel: listening starts automatically once connected —
+    // no need to tap the mic at all.
+    startListening();
   });
   activeCall.on("close", () => setConnectStatus("Call ended", false));
   activeCall.on("error", (err) => console.error("Call error:", err));
@@ -159,6 +167,11 @@ async function startCall() {
   }
   try {
     localCallStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // The WebRTC audio track would otherwise carry your raw, untranslated
+    // voice straight to the other pioneer. We mute it here and only send
+    // them the translated audio (over the data channel) instead — speech
+    // recognition keeps working fine since it captures the mic separately.
+    localCallStream.getAudioTracks().forEach((t) => (t.enabled = false));
   } catch (err) {
     alert("Microphone access is needed to start a call.");
     return;
@@ -212,6 +225,7 @@ async function joinCall(rawCode) {
   }
   try {
     localCallStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    localCallStream.getAudioTracks().forEach((t) => (t.enabled = false));
   } catch (err) {
     alert("Microphone access is needed to join a call.");
     return;
@@ -497,6 +511,60 @@ if (ringBtn) {
   });
 }
 
+// Fully ends the call: stops listening, releases the microphone, and closes
+// every connection — like actually hanging up a phone, not just pausing.
+function hangUp() {
+  try {
+    if (recognition) recognition.stop();
+  } catch {}
+  micState = "idle";
+  if (micBtn) micBtn.classList.remove("recording", "paused");
+  if (micHint) micHint.textContent = "Tap to start talking";
+  if (endBtn) endBtn.style.display = "none";
+
+  try {
+    if (activeCall) activeCall.close();
+  } catch {}
+  try {
+    if (dataConn) dataConn.close();
+  } catch {}
+  try {
+    if (peerConn) peerConn.destroy();
+  } catch {}
+  if (localCallStream) {
+    localCallStream.getTracks().forEach((t) => t.stop());
+  }
+  activeCall = null;
+  dataConn = null;
+  peerConn = null;
+  localCallStream = null;
+
+  const hangupBtn = document.getElementById("hangupBtn");
+  if (hangupBtn) hangupBtn.style.display = "none";
+  if (ringBtn) ringBtn.style.display = "none";
+  document.getElementById("roomCodeDisplay").style.display = "none";
+  if (startCallBtn) startCallBtn.classList.remove("active");
+  if (joinCallBtn) joinCallBtn.classList.remove("active");
+  if (joinCodeRow) joinCodeRow.style.display = "none";
+
+  setConnectStatus("Solo demo — not connected to another pioneer", false);
+  setStatus("Ready", "#5EE0A0");
+  transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
+}
+
+const hangupBtnEl = document.getElementById("hangupBtn");
+if (hangupBtnEl) hangupBtnEl.addEventListener("click", hangUp);
+
+const newCodeBtn = document.getElementById("newCodeBtn");
+if (newCodeBtn) {
+  newCodeBtn.addEventListener("click", () => {
+    const code = regenerateRoomCode();
+    document.getElementById("roomCodeText").textContent = code;
+    setupShareLinkButton(code);
+    showRoomQrCode(code);
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   const prefs = loadPrefs();
 
@@ -714,7 +782,15 @@ function startRecognitionSession(bcp47Lang) {
 
   recognition.onend = () => {
     if (micState === "listening") {
-      // Still in listening state — start a fresh session to keep going.
+      // In a live call: treat each natural pause like a real conversation
+      // turn — translate and send automatically, then keep listening. No
+      // "End" button needed, just like a normal phone call.
+      if (dataConn && dataConn.open && finalTranscript.trim()) {
+        const capturedText = finalTranscript.trim();
+        finalTranscript = "";
+        recognizedText = "";
+        autoTranslateAndSend(capturedText);
+      }
       startRecognitionSession(bcp47Lang);
     }
   };
@@ -723,6 +799,31 @@ function startRecognitionSession(bcp47Lang) {
     recognition.start();
   } catch (err) {
     console.error("Could not start recognition:", err);
+  }
+}
+
+// Called automatically after each natural pause during a live call — no
+// manual "End" button needed, like a real conversation turn.
+async function autoTranslateAndSend(rawText) {
+  const text = rawText.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
+  if (!text) return;
+
+  const langYouSel = document.getElementById("langYou");
+  const langThemSel = document.getElementById("langThem");
+  const sourceLang = (LANG_CODES[langYouSel.value] || LANG_CODES["English"]).iso;
+  const targetLangObj = LANG_CODES[langThemSel.value] || LANG_CODES["French"];
+
+  try {
+    const translated = await translateLongText(text, sourceLang, targetLangObj.iso);
+    transcript.innerHTML += `<p style="margin-top:.4rem;"><strong>You:</strong> ${text}<br><span style="color:#F5C36B;">→ ${translated}</span></p>`;
+    if (clearBtn) clearBtn.style.display = "inline-block";
+
+    if (dataConn && dataConn.open) {
+      dataConn.send({ type: "caption", text: translated });
+      sendSpokenTranslation(translated, targetLangObj); // fire-and-forget, keeps listening responsive
+    }
+  } catch (err) {
+    console.error("Auto-translate failed:", err);
   }
 }
 
