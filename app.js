@@ -162,6 +162,7 @@ async function sendSpokenTranslation(text, targetLangObj) {
     }
   } catch (err) {
     console.error("[PiTalk] Could not generate/send spoken translation:", err);
+    transcript.innerHTML += `<p style="color:rgba(255,255,255,.45);font-size:.78rem;">🔇 Couldn't generate spoken audio this time — text translation was still sent.</p>`;
   }
 }
 
@@ -371,6 +372,8 @@ const roomCodeInput = document.getElementById("roomCodeInput");
 
 if (startCallBtn) {
   startCallBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
     startCallBtn.classList.add("active");
     if (joinCodeRow) joinCodeRow.style.display = "none";
     startCall();
@@ -378,12 +381,16 @@ if (startCallBtn) {
 }
 if (joinCallBtn) {
   joinCallBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
     joinCallBtn.classList.add("active");
     if (joinCodeRow) joinCodeRow.style.display = "flex";
   });
 }
 if (connectBtn) {
   connectBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
     const code = roomCodeInput ? roomCodeInput.value : "";
     if (code.trim()) joinCall(code);
   });
