@@ -124,14 +124,16 @@ function setupDataConnEvents() {
       playChime();
       setConnectStatus("🔔 Your pioneer wants to talk!", true);
     } else if (data && data.type === "audio" && data.buffer) {
+      console.log("[PiTalk] Audio received over data channel, bytes:", data.buffer.byteLength);
       try {
         const blob = new Blob([data.buffer], { type: "audio/mpeg" });
         const blobUrl = URL.createObjectURL(blob);
         const audio = new Audio(blobUrl);
+        audio.onplay = () => console.log("[PiTalk] Received audio playback started.");
         audio.onended = () => URL.revokeObjectURL(blobUrl);
-        audio.play().catch((err) => console.error("Playback of received translation failed:", err));
+        audio.play().catch((err) => console.error("[PiTalk] Playback of received translation failed:", err));
       } catch (err) {
-        console.error("Could not play received translation audio:", err);
+        console.error("[PiTalk] Could not play received translation audio:", err);
       }
     } else if (typeof data === "string") {
       // Backward-compatible fallback for plain-text messages.
@@ -146,18 +148,39 @@ function setupDataConnEvents() {
 // in their own language — the live call audio alone only carries your raw
 // voice in your own language.
 async function sendSpokenTranslation(text, targetLangObj) {
+  console.log("[PiTalk] sendSpokenTranslation() called with:", text);
   const voice = STREAMELEMENTS_VOICES[targetLangObj.iso] || "Joanna";
   const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text.slice(0, 500))}`;
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Speech request failed: ${res.status}`);
     const buffer = await res.arrayBuffer();
+    console.log("[PiTalk] TTS audio generated, bytes:", buffer.byteLength);
     if (dataConn && dataConn.open) {
       dataConn.send({ type: "audio", buffer });
+      console.log("[PiTalk] Audio buffer sent over data channel.");
     }
   } catch (err) {
-    console.error("Could not generate/send spoken translation:", err);
+    console.error("[PiTalk] Could not generate/send spoken translation:", err);
   }
+}
+
+// Generates a genuinely silent audio track (Web Audio API) for the WebRTC
+// call leg. We intentionally do NOT use a real microphone stream here:
+// holding a second live getUserMedia() capture open at the same time as
+// SpeechRecognition's own internal mic access caused recognition to fail
+// silently on Android Chrome (two simultaneous mic consumers in one tab).
+// The other pioneer only ever hears the translated audio anyway (sent over
+// the data channel), so real mic audio was never needed on this track.
+function createSilentAudioStream() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const destination = ctx.createMediaStreamDestination();
+  const oscillator = ctx.createOscillator();
+  const gain = ctx.createGain();
+  gain.gain.value = 0; // true silence, not just a disabled track
+  oscillator.connect(gain).connect(destination);
+  oscillator.start();
+  return destination.stream;
 }
 
 async function startCall() {
@@ -166,14 +189,10 @@ async function startCall() {
     return;
   }
   try {
-    localCallStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    // The WebRTC audio track would otherwise carry your raw, untranslated
-    // voice straight to the other pioneer. We mute it here and only send
-    // them the translated audio (over the data channel) instead — speech
-    // recognition keeps working fine since it captures the mic separately.
-    localCallStream.getAudioTracks().forEach((t) => (t.enabled = false));
+    localCallStream = createSilentAudioStream();
   } catch (err) {
-    alert("Microphone access is needed to start a call.");
+    console.error("Could not create call audio track:", err);
+    alert("Couldn't start the call audio channel — please reload and try again.");
     return;
   }
 
@@ -224,10 +243,10 @@ async function joinCall(rawCode) {
     return;
   }
   try {
-    localCallStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    localCallStream.getAudioTracks().forEach((t) => (t.enabled = false));
+    localCallStream = createSilentAudioStream();
   } catch (err) {
-    alert("Microphone access is needed to join a call.");
+    console.error("Could not create call audio track:", err);
+    alert("Couldn't start the call audio channel — please reload and try again.");
     return;
   }
 
@@ -755,12 +774,18 @@ function unlockAudioPlayback() {
 // we're still in the "listening" state, appending each session's final text
 // exactly once. Tapping pauses this cleanly; a separate End button finalizes.
 function startRecognitionSession(bcp47Lang) {
+  console.log("[PiTalk] startRecognitionSession() called, lang:", bcp47Lang);
   recognition = new SpeechRecognitionAPI();
   recognition.lang = bcp47Lang;
   recognition.interimResults = true;
   recognition.continuous = false;
 
+  recognition.onstart = () => {
+    console.log("[PiTalk] SpeechRecognition actually started.");
+  };
+
   recognition.onresult = (event) => {
+    console.log("[PiTalk] onresult fired.", event.results);
     let interimText = "";
     for (let i = 0; i < event.results.length; i++) {
       const piece = event.results[i][0].transcript;
@@ -778,6 +803,13 @@ function startRecognitionSession(bcp47Lang) {
 
   recognition.onerror = (event) => {
     console.error("Speech recognition error:", event.error);
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      transcript.innerHTML = `<p style="color:#E8546B;">🎤 Microphone permission was blocked. Please allow microphone access for this site and try again.</p>`;
+    } else if (event.error === "audio-capture") {
+      transcript.innerHTML = `<p style="color:#E8546B;">🎤 No microphone could be accessed on this device right now.</p>`;
+    } else if (event.error !== "no-speech" && event.error !== "aborted") {
+      transcript.innerHTML = `<p style="color:#E8546B;">⚠️ Voice recognition error: ${event.error}. Tap the mic to try again.</p>`;
+    }
   };
 
   recognition.onend = () => {
@@ -797,8 +829,9 @@ function startRecognitionSession(bcp47Lang) {
 
   try {
     recognition.start();
+    console.log("[PiTalk] recognition.start() called without throwing.");
   } catch (err) {
-    console.error("Could not start recognition:", err);
+    console.error("[PiTalk] Could not start recognition:", err);
   }
 }
 
@@ -806,6 +839,7 @@ function startRecognitionSession(bcp47Lang) {
 // manual "End" button needed, like a real conversation turn.
 async function autoTranslateAndSend(rawText) {
   const text = rawText.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
+  console.log("[PiTalk] autoTranslateAndSend() called with:", text);
   if (!text) return;
 
   const langYouSel = document.getElementById("langYou");
@@ -814,20 +848,24 @@ async function autoTranslateAndSend(rawText) {
   const targetLangObj = LANG_CODES[langThemSel.value] || LANG_CODES["French"];
 
   try {
+    console.log("[PiTalk] Sending translation request…");
     const translated = await translateLongText(text, sourceLang, targetLangObj.iso);
+    console.log("[PiTalk] Translation received:", translated);
     transcript.innerHTML += `<p style="margin-top:.4rem;"><strong>You:</strong> ${text}<br><span style="color:#F5C36B;">→ ${translated}</span></p>`;
     if (clearBtn) clearBtn.style.display = "inline-block";
 
     if (dataConn && dataConn.open) {
       dataConn.send({ type: "caption", text: translated });
+      console.log("[PiTalk] Caption sent over data channel.");
       sendSpokenTranslation(translated, targetLangObj); // fire-and-forget, keeps listening responsive
     }
   } catch (err) {
-    console.error("Auto-translate failed:", err);
+    console.error("[PiTalk] Auto-translate failed:", err);
   }
 }
 
 function startListening() {
+  console.log("[PiTalk] startListening() called.");
   if (!SpeechRecognitionAPI) {
     alert("Your browser doesn't support live voice recognition. Please test in Chrome.");
     return;
@@ -864,6 +902,7 @@ function pauseListening() {
 
 function handleMicTap(e) {
   e.preventDefault();
+  console.log("[PiTalk] Mic tapped. Current micState:", micState);
   if (micState === "idle" || micState === "paused") {
     startListening();
   } else if (micState === "listening") {
