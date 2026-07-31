@@ -278,6 +278,19 @@ img{max-width:100%;display:block;}
   padding:0.8rem;font-size:0.95rem;margin-top:0.5rem;
   box-shadow:0 8px 20px rgba(232,84,107,.4);
 }
+.incoming-call{
+  background:rgba(94,224,160,.1);border:1px solid rgba(94,224,160,.4);
+  border-radius:14px;padding:1rem;margin-top:0.75rem;text-align:center;
+  animation:pulse-bg 1s ease-in-out infinite;
+}
+@keyframes pulse-bg{0%,100%{background:rgba(94,224,160,.1);}50%{background:rgba(94,224,160,.22);}}
+.incoming-call__text{font-size:0.85rem;color:#5EE0A0;margin-bottom:0.75rem;font-weight:600;}
+.btn--answer{
+  background:linear-gradient(135deg,#5EE0A0,#2E9E5B);
+  color:#0d1f14;font-weight:700;width:100%;
+  padding:0.8rem;font-size:0.95rem;
+  box-shadow:0 8px 20px rgba(94,224,160,.4);
+}
 .btn--clear{
   color:rgba(255,255,255,.6);font-size:0.78rem;
   padding:0.3rem;margin-bottom:0.75rem;text-decoration:underline;
