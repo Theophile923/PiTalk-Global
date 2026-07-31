@@ -97,15 +97,57 @@ function playChime() {
   }
 }
 
+// A distinct, longer ringtone (3-note pattern, different timbre from the
+// connect chime) that repeats every 2.5s until answered or cancelled — like
+// a real incoming call, not a one-off notification sound.
+let ringInterval = null;
+
+function playRingTone() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    [523.25, 659.25, 783.99].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = freq;
+      osc.type = "triangle";
+      gain.gain.setValueAtTime(0.0001, now + i * 0.15);
+      gain.gain.exponentialRampToValueAtTime(0.22, now + i * 0.15 + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.15 + 0.35);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + i * 0.15);
+      osc.stop(now + i * 0.15 + 0.4);
+    });
+  } catch (err) {
+    console.error("Ring tone failed:", err);
+  }
+}
+
+function startRinging() {
+  stopRinging();
+  playRingTone();
+  ringInterval = setInterval(playRingTone, 2500);
+}
+
+function stopRinging() {
+  if (ringInterval) {
+    clearInterval(ringInterval);
+    ringInterval = null;
+  }
+}
+
 function setupCallEvents() {
   activeCall.on("stream", (remoteStream) => {
+    stopRinging();
+    const banner = document.getElementById("incomingCallBanner");
+    if (banner) banner.style.display = "none";
     const remoteAudio = document.getElementById("remoteAudio");
     remoteAudio.srcObject = remoteStream;
     remoteAudio.play().catch(() => {});
     setConnectStatus("Connected — just talk, no buttons needed", true);
     playChime();
     const ringBtn = document.getElementById("ringBtn");
-    if (ringBtn) ringBtn.style.display = "inline-block";
+    if (ringBtn) ringBtn.style.display = "none";
     const hangupBtn = document.getElementById("hangupBtn");
     if (hangupBtn) hangupBtn.style.display = "block";
     // Phone-call feel: listening starts automatically once connected —
@@ -120,9 +162,16 @@ function setupDataConnEvents() {
   dataConn.on("data", (data) => {
     if (data && data.type === "caption") {
       transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data.text}</p>`;
+    } else if (data && data.type === "joined") {
+      // The other pioneer connected — the host can now ring them.
+      const ringBtn = document.getElementById("ringBtn");
+      if (ringBtn) ringBtn.style.display = "inline-block";
+      setConnectStatus("Your pioneer joined — tap Ring to alert them", false);
     } else if (data && data.type === "ring") {
-      playChime();
-      setConnectStatus("🔔 Your pioneer wants to talk!", true);
+      const banner = document.getElementById("incomingCallBanner");
+      if (banner) banner.style.display = "block";
+      startRinging();
+      setConnectStatus("📳 Incoming call…", false);
     } else if (data && data.type === "audio" && data.buffer) {
       console.log("[PiTalk] Audio received over data channel, bytes:", data.buffer.byteLength);
       try {
@@ -238,6 +287,8 @@ async function startCall() {
   });
 }
 
+let targetHostId = null;
+
 async function joinCall(rawCode) {
   if (typeof Peer === "undefined") {
     alert("Calling isn't available right now — please reload the page.");
@@ -252,22 +303,44 @@ async function joinCall(rawCode) {
   }
 
   const fullId = "pitalkglobal-" + rawCode.trim().toUpperCase();
+  targetHostId = fullId;
   isCallHost = false;
   peerConn = new Peer();
 
   peerConn.on("open", () => {
     setConnectStatus("Connecting…", false);
-    activeCall = peerConn.call(fullId, localCallStream);
-    setupCallEvents();
     dataConn = peerConn.connect(fullId);
     setupDataConnEvents();
+    dataConn.on("open", () => {
+      dataConn.send({ type: "joined" });
+      setConnectStatus("Waiting for your pioneer to ring you…", false);
+    });
     showSaveFavoritePrompt();
+  });
+
+  // In case the host calls us directly (fallback path).
+  peerConn.on("call", (incomingCall) => {
+    incomingCall.answer(localCallStream);
+    activeCall = incomingCall;
+    setupCallEvents();
   });
 
   peerConn.on("error", (err) => {
     console.error("Peer error:", err);
     setConnectStatus("Couldn't connect — check the code and try again.", false);
   });
+}
+
+// Called when the joiner taps "Answer" on the incoming-call banner — this is
+// the moment the real audio call actually starts, on purpose (like actually
+// picking up a ringing phone, instead of connecting silently in the background).
+function answerCall() {
+  stopRinging();
+  const banner = document.getElementById("incomingCallBanner");
+  if (banner) banner.style.display = "none";
+  if (!peerConn || !targetHostId) return;
+  activeCall = peerConn.call(targetHostId, localCallStream);
+  setupCallEvents();
 }
 
 
@@ -530,16 +603,32 @@ checkForInviteLink();
 const ringBtn = document.getElementById("ringBtn");
 if (ringBtn) {
   ringBtn.addEventListener("click", () => {
-    playChime();
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
     if (dataConn && dataConn.open) {
       dataConn.send({ type: "ring" });
+      setConnectStatus("📞 Ringing your pioneer…", false);
+      ringBtn.style.display = "none";
     }
+  });
+}
+
+const answerBtn = document.getElementById("answerBtn");
+if (answerBtn) {
+  answerBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
+    answerCall();
   });
 }
 
 // Fully ends the call: stops listening, releases the microphone, and closes
 // every connection — like actually hanging up a phone, not just pausing.
 function hangUp() {
+  stopRinging();
+  const banner = document.getElementById("incomingCallBanner");
+  if (banner) banner.style.display = "none";
+  targetHostId = null;
   try {
     if (recognition) recognition.stop();
   } catch {}
