@@ -37,6 +37,53 @@ let activeCall = null;
 let dataConn = null;
 let localCallStream = null;
 let isCallHost = false;
+let pendingCaptionForFallback = null;
+let fallbackSpeakTimer = null;
+
+// ---- Local device voice — fallback used when StreamElements doesn't
+// deliver audio in time. Chrome loads its voice list asynchronously, so we
+// wait for it properly instead of grabbing an empty list on the first call.
+function getVoicesAsync() {
+  return new Promise((resolve) => {
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length) return resolve(voices);
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve(window.speechSynthesis.getVoices());
+    };
+    window.speechSynthesis.addEventListener("voiceschanged", finish, { once: true });
+    setTimeout(finish, 1000);
+  });
+}
+
+async function speakLocally(text, langName) {
+  if (!("speechSynthesis" in window)) return;
+  const langObj = LANG_CODES[langName] || LANG_CODES["English"];
+  window.speechSynthesis.cancel();
+
+  const voices = await getVoicesAsync();
+  const prefix = langObj.bcp47.split("-")[0].toLowerCase();
+  const voice =
+    voices.find((v) => v.lang && v.lang.toLowerCase() === langObj.bcp47.toLowerCase()) ||
+    voices.find((v) => v.lang && v.lang.toLowerCase().startsWith(prefix));
+  if (!voice) return; // no voice available on this device — nothing we can do locally either
+
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = langObj.bcp47;
+  utter.voice = voice;
+  utter.rate = 0.92;
+  window.speechSynthesis.speak(utter);
+
+  // Chrome desktop bug: speech synthesis silently pauses after ~15s on long
+  // text unless nudged periodically.
+  const keepAlive = setInterval(() => {
+    if (!window.speechSynthesis.speaking) return clearInterval(keepAlive);
+    window.speechSynthesis.pause();
+    window.speechSynthesis.resume();
+  }, 10000);
+}
 
 function generateRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous chars
@@ -162,6 +209,17 @@ function setupDataConnEvents() {
   dataConn.on("data", (data) => {
     if (data && data.type === "caption") {
       transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data.text}</p>`;
+      // If StreamElements audio doesn't arrive shortly after, speak the
+      // caption locally instead — a fallback that doesn't depend on any
+      // external TTS service at all.
+      pendingCaptionForFallback = data.text;
+      clearTimeout(fallbackSpeakTimer);
+      fallbackSpeakTimer = setTimeout(() => {
+        if (pendingCaptionForFallback === data.text) {
+          console.log("[PiTalk] No audio arrived — falling back to local device voice.");
+          speakLocally(data.text, (document.getElementById("langYou") || {}).value);
+        }
+      }, 3500);
     } else if (data && data.type === "joined") {
       // The other pioneer connected — the host can now ring them.
       const ringBtn = document.getElementById("ringBtn");
@@ -174,6 +232,8 @@ function setupDataConnEvents() {
       setConnectStatus("📳 Incoming call…", false);
     } else if (data && data.type === "audio" && data.buffer) {
       console.log("[PiTalk] Audio received over data channel, bytes:", data.buffer.byteLength);
+      pendingCaptionForFallback = null;
+      clearTimeout(fallbackSpeakTimer);
       try {
         const blob = new Blob([data.buffer], { type: "audio/mpeg" });
         const blobUrl = URL.createObjectURL(blob);
@@ -795,6 +855,35 @@ async function speakTranslation(translatedText, targetLangObj) {
 // MyMemory truncates/rejects long queries, so split into sentence-sized
 // chunks and translate each in turn — this avoids ever cutting off mid-
 // sentence on longer conversations (multiple speak/pause turns before End).
+// Tries Lingva Translate first (proxies real Google Translate — much better
+// quality than MyMemory's translation-memory matching, which sometimes
+// returns a completely unrelated "closest match" phrase instead of a real
+// translation). Falls back to MyMemory if Lingva's public instance is down.
+async function translateChunk(chunk, sourceLang, targetLang) {
+  try {
+    const res = await fetch(
+      `https://lingva.ml/api/v1/${sourceLang}/${targetLang}/${encodeURIComponent(chunk)}`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.translation) return data.translation;
+    }
+    throw new Error("Lingva unavailable");
+  } catch (err) {
+    console.warn("[PiTalk] Lingva failed, falling back to MyMemory:", err);
+    const params = new URLSearchParams({
+      q: chunk.slice(0, 500),
+      langpair: `${sourceLang}|${targetLang}`,
+    });
+    const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
+    const data = await res.json();
+    if (data.responseStatus !== 200 || !data.responseData) {
+      throw new Error(data.responseDetails || "Translation failed");
+    }
+    return data.responseData.translatedText;
+  }
+}
+
 async function translateLongText(text, sourceLang, targetLang) {
   const sentences = text.match(/[^.!?]+[.!?]*(\s+|$)/g) || [text];
   const chunks = [];
@@ -812,16 +901,7 @@ async function translateLongText(text, sourceLang, targetLang) {
 
   const translatedParts = [];
   for (const chunk of chunks) {
-    const params = new URLSearchParams({
-      q: chunk.slice(0, 500),
-      langpair: `${sourceLang}|${targetLang}`,
-    });
-    const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
-    const data = await res.json();
-    if (data.responseStatus !== 200 || !data.responseData) {
-      throw new Error(data.responseDetails || "Translation failed");
-    }
-    translatedParts.push(data.responseData.translatedText);
+    translatedParts.push(await translateChunk(chunk, sourceLang, targetLang));
   }
   return translatedParts.join(" ");
 }
