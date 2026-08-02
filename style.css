@@ -242,6 +242,15 @@ img{max-width:100%;display:block;}
   font-family:var(--font-display);font-size:1.4rem;font-weight:700;
   letter-spacing:0.1em;color:var(--gold);
 }
+.voice-gender{margin:0.75rem 0 1.1rem;text-align:center;}
+.voice-gender label{display:block;font-size:0.7rem;color:rgba(255,255,255,.5);margin-bottom:0.4rem;}
+.voice-gender__buttons{display:flex;gap:0.5rem;justify-content:center;}
+.btn--voice{
+  background:rgba(255,255,255,.08);color:rgba(255,255,255,.7);
+  border:1px solid rgba(255,255,255,.2);
+  padding:0.4rem 0.9rem;font-size:0.8rem;
+}
+.btn--voice.active{background:var(--violet);border-color:var(--violet);color:#fff;font-weight:600;}
 .room-qr{
   width:130px;height:130px;margin:0.85rem auto 0.3rem;
   border-radius:10px;background:#fff;padding:6px;display:block;
