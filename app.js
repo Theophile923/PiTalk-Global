@@ -39,6 +39,7 @@ let localCallStream = null;
 let isCallHost = false;
 let pendingCaptionForFallback = null;
 let fallbackSpeakTimer = null;
+let audioHandledForCurrentTurn = true; // true = nothing pending
 
 // ---- Local device voice — fallback used when StreamElements doesn't
 // deliver audio in time. Chrome loads its voice list asynchronously, so we
@@ -210,12 +211,15 @@ function setupDataConnEvents() {
     if (data && data.type === "caption") {
       transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data.text}</p>`;
       // If StreamElements audio doesn't arrive shortly after, speak the
-      // caption locally instead — a fallback that doesn't depend on any
-      // external TTS service at all.
+      // caption locally instead. audioHandledForCurrentTurn is a hard lock —
+      // whichever path (real audio or local fallback) fires FIRST wins, and
+      // the other is skipped, so the voice can never play twice.
+      audioHandledForCurrentTurn = false;
       pendingCaptionForFallback = data.text;
       clearTimeout(fallbackSpeakTimer);
       fallbackSpeakTimer = setTimeout(() => {
-        if (pendingCaptionForFallback === data.text) {
+        if (!audioHandledForCurrentTurn && pendingCaptionForFallback === data.text) {
+          audioHandledForCurrentTurn = true;
           console.log("[PiTalk] No audio arrived — falling back to local device voice.");
           speakLocally(data.text, (document.getElementById("langYou") || {}).value);
         }
@@ -232,6 +236,11 @@ function setupDataConnEvents() {
       setConnectStatus("📳 Incoming call…", false);
     } else if (data && data.type === "audio" && data.buffer) {
       console.log("[PiTalk] Audio received over data channel, bytes:", data.buffer.byteLength);
+      if (audioHandledForCurrentTurn) {
+        console.log("[PiTalk] Local fallback already spoke this turn — skipping real audio to avoid double voice.");
+        return;
+      }
+      audioHandledForCurrentTurn = true;
       pendingCaptionForFallback = null;
       clearTimeout(fallbackSpeakTimer);
       try {
@@ -258,7 +267,7 @@ function setupDataConnEvents() {
 // voice in your own language.
 async function sendSpokenTranslation(text, targetLangObj) {
   console.log("[PiTalk] sendSpokenTranslation() called with:", text);
-  const voice = STREAMELEMENTS_VOICES[targetLangObj.iso] || "Joanna";
+  const voice = getVoiceId(targetLangObj.iso);
   const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text.slice(0, 500))}`;
   try {
     const res = await fetch(url);
@@ -740,6 +749,26 @@ if (newCodeBtn) {
   });
 }
 
+const voiceFemaleBtn = document.getElementById("voiceFemaleBtn");
+const voiceMaleBtn = document.getElementById("voiceMaleBtn");
+function applyVoiceGenderUI(gender) {
+  if (voiceFemaleBtn) voiceFemaleBtn.classList.toggle("active", gender !== "male");
+  if (voiceMaleBtn) voiceMaleBtn.classList.toggle("active", gender === "male");
+}
+if (voiceFemaleBtn) {
+  voiceFemaleBtn.addEventListener("click", () => {
+    savePrefs({ ...loadPrefs(), voiceGender: "female" });
+    applyVoiceGenderUI("female");
+  });
+}
+if (voiceMaleBtn) {
+  voiceMaleBtn.addEventListener("click", () => {
+    savePrefs({ ...loadPrefs(), voiceGender: "male" });
+    applyVoiceGenderUI("male");
+  });
+}
+applyVoiceGenderUI(loadPrefs().voiceGender);
+
 document.addEventListener("DOMContentLoaded", () => {
   const prefs = loadPrefs();
 
@@ -790,10 +819,21 @@ if (tryDemoBtn) {
 // the Pi Browser's WebView often lacks. Note: this is an unofficial, free
 // community endpoint, not a documented paid service — fine for testing, but
 // should be replaced with a proper paid TTS provider before a real launch.
-const STREAMELEMENTS_VOICES = { en: "Joanna", fr: "Celine", zh: "Zhiyu" };
+const STREAMELEMENTS_VOICES = {
+  en: { female: "Joanna", male: "Matthew" },
+  fr: { female: "Celine", male: "Mathieu" },
+  zh: { female: "Zhiyu", male: "Zhiyu" }, // no distinct male Mandarin voice available on this free service
+};
+
+function getVoiceId(iso) {
+  const prefs = loadPrefs();
+  const gender = prefs.voiceGender === "male" ? "male" : "female";
+  const entry = STREAMELEMENTS_VOICES[iso] || STREAMELEMENTS_VOICES.en;
+  return entry[gender] || entry.female;
+}
 
 async function speakTranslation(translatedText, targetLangObj) {
-  const voice = STREAMELEMENTS_VOICES[targetLangObj.iso] || "Joanna";
+  const voice = getVoiceId(targetLangObj.iso);
   const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(translatedText.slice(0, 500))}`;
 
   try {
