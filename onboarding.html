@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Welcome — PiTalk Global</title>
+<title>Welcome — TalkConnect</title>
 <link rel="icon" type="image/png" href="assets/logo.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -55,7 +55,7 @@
       <div class="brand-mark" style="justify-content:center;height:26px;margin-bottom:1.5rem;">
         <span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span>
       </div>
-      <h1>Welcome to PiTalk Global</h1>
+      <h1>Welcome to TalkConnect</h1>
       <p>Speak your language, out loud. The pioneer on the other end hears theirs — no typing, no waiting.</p>
     </div>
   </div>
@@ -115,7 +115,7 @@
   function render() {
     screens.forEach(s => s.classList.toggle("active", Number(s.dataset.screen) === step));
     dots.forEach((d, i) => d.classList.toggle("active", i === step - 1));
-    nextBtn.textContent = step === total ? "Start using PiTalk Global" : "Continue";
+    nextBtn.textContent = step === total ? "Start using TalkConnect" : "Continue";
   }
 
   function finishOnboarding() {
