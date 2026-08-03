@@ -1,5 +1,5 @@
 /* ============================================================
-   PiTalk Global — front-end shell
+   TalkConnect — front-end shell
    NOTE FOR GOODHOPE:
    - Minimal working MVP: real speech recognition, real machine
      translation, real spoken output — for English <-> French
@@ -23,7 +23,7 @@
      persistent storage instead.
    ============================================================ */
 
-const STORAGE_KEY = "pitalk_prefs_v1";
+const STORAGE_KEY = "talkconnect_prefs_v1";
 
 // ============================================================
 // Peer-to-peer connection between two pioneers (PeerJS, free
@@ -93,7 +93,7 @@ function generateRoomCode() {
   return code;
 }
 
-const ROOM_CODE_KEY = "pitalk_room_code_v1";
+const ROOM_CODE_KEY = "talkconnect_room_code_v1";
 const ROOM_CODE_TTL_MS = 365 * 24 * 60 * 60 * 1000; // effectively permanent — regenerate manually if lost/leaked
 
 function getOrCreateRoomCode() {
@@ -220,7 +220,7 @@ function setupDataConnEvents() {
       fallbackSpeakTimer = setTimeout(() => {
         if (!audioHandledForCurrentTurn && pendingCaptionForFallback === data.text) {
           audioHandledForCurrentTurn = true;
-          console.log("[PiTalk] No audio arrived — falling back to local device voice.");
+          console.log("[TalkConnect] No audio arrived — falling back to local device voice.");
           speakLocally(data.text, (document.getElementById("langYou") || {}).value);
         }
       }, 3500);
@@ -235,9 +235,9 @@ function setupDataConnEvents() {
       startRinging();
       setConnectStatus("📳 Incoming call…", false);
     } else if (data && data.type === "audio" && data.buffer) {
-      console.log("[PiTalk] Audio received over data channel, bytes:", data.buffer.byteLength);
+      console.log("[TalkConnect] Audio received over data channel, bytes:", data.buffer.byteLength);
       if (audioHandledForCurrentTurn) {
-        console.log("[PiTalk] Local fallback already spoke this turn — skipping real audio to avoid double voice.");
+        console.log("[TalkConnect] Local fallback already spoke this turn — skipping real audio to avoid double voice.");
         return;
       }
       audioHandledForCurrentTurn = true;
@@ -247,11 +247,11 @@ function setupDataConnEvents() {
         const blob = new Blob([data.buffer], { type: "audio/mpeg" });
         const blobUrl = URL.createObjectURL(blob);
         const audio = new Audio(blobUrl);
-        audio.onplay = () => console.log("[PiTalk] Received audio playback started.");
+        audio.onplay = () => console.log("[TalkConnect] Received audio playback started.");
         audio.onended = () => URL.revokeObjectURL(blobUrl);
-        audio.play().catch((err) => console.error("[PiTalk] Playback of received translation failed:", err));
+        audio.play().catch((err) => console.error("[TalkConnect] Playback of received translation failed:", err));
       } catch (err) {
-        console.error("[PiTalk] Could not play received translation audio:", err);
+        console.error("[TalkConnect] Could not play received translation audio:", err);
       }
     } else if (typeof data === "string") {
       // Backward-compatible fallback for plain-text messages.
@@ -266,20 +266,20 @@ function setupDataConnEvents() {
 // in their own language — the live call audio alone only carries your raw
 // voice in your own language.
 async function sendSpokenTranslation(text, targetLangObj) {
-  console.log("[PiTalk] sendSpokenTranslation() called with:", text);
+  console.log("[TalkConnect] sendSpokenTranslation() called with:", text);
   const voice = getVoiceId(targetLangObj.iso);
   const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text.slice(0, 500))}`;
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Speech request failed: ${res.status}`);
     const buffer = await res.arrayBuffer();
-    console.log("[PiTalk] TTS audio generated, bytes:", buffer.byteLength);
+    console.log("[TalkConnect] TTS audio generated, bytes:", buffer.byteLength);
     if (dataConn && dataConn.open) {
       dataConn.send({ type: "audio", buffer });
-      console.log("[PiTalk] Audio buffer sent over data channel.");
+      console.log("[TalkConnect] Audio buffer sent over data channel.");
     }
   } catch (err) {
-    console.error("[PiTalk] Could not generate/send spoken translation:", err);
+    console.error("[TalkConnect] Could not generate/send spoken translation:", err);
     transcript.innerHTML += `<p style="color:rgba(255,255,255,.45);font-size:.78rem;">🔇 Couldn't generate spoken audio this time — text translation was still sent.</p>`;
   }
 }
@@ -316,7 +316,7 @@ async function startCall() {
   }
 
   const code = getOrCreateRoomCode();
-  const fullId = "pitalkglobal-" + code;
+  const fullId = "talkconnect-" + code;
   isCallHost = true;
   peerConn = new Peer(fullId);
 
@@ -371,7 +371,7 @@ async function joinCall(rawCode) {
     return;
   }
 
-  const fullId = "pitalkglobal-" + rawCode.trim().toUpperCase();
+  const fullId = "talkconnect-" + rawCode.trim().toUpperCase();
   targetHostId = fullId;
   isCallHost = false;
   peerConn = new Peer();
@@ -547,7 +547,7 @@ function setupShareLinkButton(code) {
     if (navigator.share) {
       try {
         await navigator.share({
-          title: "Join me on PiTalk Global",
+          title: "Join me on TalkConnect",
           text: "Tap to join our real-time translated call:",
           url: link,
         });
@@ -577,7 +577,7 @@ function showRoomQrCode(code) {
 }
 
 // ---- Saved pioneers (favorites) ----
-const FAVORITES_KEY = "pitalk_favorites_v1";
+const FAVORITES_KEY = "talkconnect_favorites_v1";
 
 function loadFavorites() {
   try {
@@ -910,7 +910,7 @@ async function translateChunk(chunk, sourceLang, targetLang) {
     }
     throw new Error("Lingva unavailable");
   } catch (err) {
-    console.warn("[PiTalk] Lingva failed, falling back to MyMemory:", err);
+    console.warn("[TalkConnect] Lingva failed, falling back to MyMemory:", err);
     const params = new URLSearchParams({
       q: chunk.slice(0, 500),
       langpair: `${sourceLang}|${targetLang}`,
@@ -990,18 +990,18 @@ function unlockAudioPlayback() {
 // we're still in the "listening" state, appending each session's final text
 // exactly once. Tapping pauses this cleanly; a separate End button finalizes.
 function startRecognitionSession(bcp47Lang) {
-  console.log("[PiTalk] startRecognitionSession() called, lang:", bcp47Lang);
+  console.log("[TalkConnect] startRecognitionSession() called, lang:", bcp47Lang);
   recognition = new SpeechRecognitionAPI();
   recognition.lang = bcp47Lang;
   recognition.interimResults = true;
   recognition.continuous = false;
 
   recognition.onstart = () => {
-    console.log("[PiTalk] SpeechRecognition actually started.");
+    console.log("[TalkConnect] SpeechRecognition actually started.");
   };
 
   recognition.onresult = (event) => {
-    console.log("[PiTalk] onresult fired.", event.results);
+    console.log("[TalkConnect] onresult fired.", event.results);
     let interimText = "";
     for (let i = 0; i < event.results.length; i++) {
       const piece = event.results[i][0].transcript;
@@ -1045,9 +1045,9 @@ function startRecognitionSession(bcp47Lang) {
 
   try {
     recognition.start();
-    console.log("[PiTalk] recognition.start() called without throwing.");
+    console.log("[TalkConnect] recognition.start() called without throwing.");
   } catch (err) {
-    console.error("[PiTalk] Could not start recognition:", err);
+    console.error("[TalkConnect] Could not start recognition:", err);
   }
 }
 
@@ -1055,7 +1055,7 @@ function startRecognitionSession(bcp47Lang) {
 // manual "End" button needed, like a real conversation turn.
 async function autoTranslateAndSend(rawText) {
   const text = rawText.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
-  console.log("[PiTalk] autoTranslateAndSend() called with:", text);
+  console.log("[TalkConnect] autoTranslateAndSend() called with:", text);
   if (!text) return;
 
   const langYouSel = document.getElementById("langYou");
@@ -1064,24 +1064,24 @@ async function autoTranslateAndSend(rawText) {
   const targetLangObj = LANG_CODES[langThemSel.value] || LANG_CODES["French"];
 
   try {
-    console.log("[PiTalk] Sending translation request…");
+    console.log("[TalkConnect] Sending translation request…");
     const translated = await translateLongText(text, sourceLang, targetLangObj.iso);
-    console.log("[PiTalk] Translation received:", translated);
+    console.log("[TalkConnect] Translation received:", translated);
     transcript.innerHTML += `<p style="margin-top:.4rem;"><strong>You:</strong> ${text}<br><span style="color:#F5C36B;">→ ${translated}</span></p>`;
     if (clearBtn) clearBtn.style.display = "inline-block";
 
     if (dataConn && dataConn.open) {
       dataConn.send({ type: "caption", text: translated });
-      console.log("[PiTalk] Caption sent over data channel.");
+      console.log("[TalkConnect] Caption sent over data channel.");
       sendSpokenTranslation(translated, targetLangObj); // fire-and-forget, keeps listening responsive
     }
   } catch (err) {
-    console.error("[PiTalk] Auto-translate failed:", err);
+    console.error("[TalkConnect] Auto-translate failed:", err);
   }
 }
 
 function startListening() {
-  console.log("[PiTalk] startListening() called.");
+  console.log("[TalkConnect] startListening() called.");
   if (!SpeechRecognitionAPI) {
     alert("Your browser doesn't support live voice recognition. Please test in Chrome.");
     return;
@@ -1118,7 +1118,7 @@ function pauseListening() {
 
 function handleMicTap(e) {
   e.preventDefault();
-  console.log("[PiTalk] Mic tapped. Current micState:", micState);
+  console.log("[TalkConnect] Mic tapped. Current micState:", micState);
   if (micState === "idle" || micState === "paused") {
     startListening();
   } else if (micState === "listening") {
@@ -1291,7 +1291,7 @@ document.querySelectorAll(".btn--plan").forEach((btn) => {
       await Pi.createPayment(
         {
           amount: amount,
-          memo: `PiTalk Global — ${plan} plan`,
+          memo: `TalkConnect — ${plan} plan`,
           metadata: { plan },
         },
         {
