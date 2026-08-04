@@ -1,157 +1,1324 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Welcome — TalkConnect</title>
-<link rel="icon" type="image/png" href="assets/logo.png" />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css" />
-<style>
-  body{background:radial-gradient(circle at 20% 15%,#4a1f8f 0%,var(--deep-purple) 55%);min-height:100vh;color:#fff;}
-  .onboard{
-    max-width:420px;margin:0 auto;min-height:100vh;
-    display:flex;flex-direction:column;justify-content:space-between;
-    padding:2.5rem 1.5rem 2rem;
+/* ============================================================
+   TalkConnect — front-end shell
+   NOTE FOR GOODHOPE:
+   - Minimal working MVP: real speech recognition, real machine
+     translation, real spoken output — for English <-> French
+     (and Chinese, best-effort) using free browser + public APIs.
+   - Speech recognition & speech synthesis use the browser's
+     built-in Web Speech API (Chrome only, reliable).
+   - Translation uses the free MyMemory API (no key, CORS-enabled,
+     ~5,000 chars/day per visitor). Fine for testing, not for
+     real launch scale.
+   - Pi Authentication: auto-triggers on page load AND via the
+     manual "Sign in with Pi" button, per Pi Network's GenAI
+     integration requirements. The access token is sent to a
+     BACKEND endpoint for validation — see BACKEND_BASE_URL below.
+     ⚠️ Until a real backend exists, this falls back to calling
+     Pi's /v2/me endpoint directly from the browser so you can
+     test end-to-end. THIS IS NOT SAFE FOR REAL LAUNCH: a modified
+     client could skip validation entirely. Before going live,
+     move this call to your own server (see validateWithBackend).
+   - Persistence uses localStorage until this app is officially
+     registered in Pi App Studio and can use its real multi-device
+     persistent storage instead.
+   ============================================================ */
+
+const STORAGE_KEY = "talkconnect_prefs_v1";
+
+// ============================================================
+// Peer-to-peer connection between two pioneers (PeerJS, free
+// public broker, no account needed for the host or the joiner).
+// Real voice goes directly between devices (WebRTC audio); each
+// side's translated text is also sent over a data channel and
+// shown as a caption, so translation doesn't depend on TTS.
+// ============================================================
+let peerConn = null;
+let activeCall = null;
+let dataConn = null;
+let localCallStream = null;
+let isCallHost = false;
+let pendingCaptionForFallback = null;
+let fallbackSpeakTimer = null;
+let audioHandledForCurrentTurn = true; // true = nothing pending
+
+// ---- Local device voice — fallback used when StreamElements doesn't
+// deliver audio in time. Chrome loads its voice list asynchronously, so we
+// wait for it properly instead of grabbing an empty list on the first call.
+function getVoicesAsync() {
+  return new Promise((resolve) => {
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length) return resolve(voices);
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve(window.speechSynthesis.getVoices());
+    };
+    window.speechSynthesis.addEventListener("voiceschanged", finish, { once: true });
+    setTimeout(finish, 1000);
+  });
+}
+
+async function speakLocally(text, langName) {
+  if (!("speechSynthesis" in window)) return;
+  const langObj = LANG_CODES[langName] || LANG_CODES["English"];
+  window.speechSynthesis.cancel();
+
+  const voices = await getVoicesAsync();
+  const prefix = langObj.bcp47.split("-")[0].toLowerCase();
+  const voice =
+    voices.find((v) => v.lang && v.lang.toLowerCase() === langObj.bcp47.toLowerCase()) ||
+    voices.find((v) => v.lang && v.lang.toLowerCase().startsWith(prefix));
+  if (!voice) return; // no voice available on this device — nothing we can do locally either
+
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = langObj.bcp47;
+  utter.voice = voice;
+  utter.rate = 0.92;
+  window.speechSynthesis.speak(utter);
+
+  // Chrome desktop bug: speech synthesis silently pauses after ~15s on long
+  // text unless nudged periodically.
+  const keepAlive = setInterval(() => {
+    if (!window.speechSynthesis.speaking) return clearInterval(keepAlive);
+    window.speechSynthesis.pause();
+    window.speechSynthesis.resume();
+  }, 10000);
+}
+
+function generateRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous chars
+  let code = "";
+  for (let i = 0; i < 4; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+const ROOM_CODE_KEY = "talkconnect_room_code_v1";
+const ROOM_CODE_TTL_MS = 365 * 24 * 60 * 60 * 1000; // effectively permanent — regenerate manually if lost/leaked
+
+function getOrCreateRoomCode() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ROOM_CODE_KEY) || "null");
+    if (saved && saved.code && Date.now() - saved.createdAt < ROOM_CODE_TTL_MS) {
+      return saved.code;
+    }
+  } catch {}
+  const code = generateRoomCode();
+  localStorage.setItem(ROOM_CODE_KEY, JSON.stringify({ code, createdAt: Date.now() }));
+  return code;
+}
+
+function regenerateRoomCode() {
+  const code = generateRoomCode();
+  localStorage.setItem(ROOM_CODE_KEY, JSON.stringify({ code, createdAt: Date.now() }));
+  return code;
+}
+
+function setConnectStatus(text, connected) {
+  const el = document.getElementById("connectStatus");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle("connected", !!connected);
+}
+
+// Generates a short two-tone chime with the Web Audio API — no sound file
+// needed, so it works reliably everywhere (unlike the translated-speech
+// audio, which depends on a network fetch).
+function playChime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    [660, 880].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = freq;
+      osc.type = "sine";
+      gain.gain.setValueAtTime(0.0001, now + i * 0.18);
+      gain.gain.exponentialRampToValueAtTime(0.18, now + i * 0.18 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.18 + 0.18);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + i * 0.18);
+      osc.stop(now + i * 0.18 + 0.2);
+    });
+  } catch (err) {
+    console.error("Chime failed:", err);
   }
-  .onboard__skip{align-self:flex-end;color:rgba(255,255,255,.55);font-size:0.85rem;background:none;border:none;cursor:pointer;}
-  .onboard__body{text-align:center;flex:1;display:flex;flex-direction:column;justify-content:center;}
-  .onboard__icon{font-size:3rem;margin-bottom:1.5rem;}
-  .onboard__body h1{font-size:1.6rem;margin-bottom:0.85rem;line-height:1.25;}
-  .onboard__body p{color:rgba(255,255,255,.75);font-size:0.95rem;max-width:320px;margin:0 auto;}
-  .onboard__dots{display:flex;gap:0.4rem;justify-content:center;margin:2rem 0;}
-  .onboard__dots span{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25);transition:background .2s,width .2s;}
-  .onboard__dots span.active{background:var(--gold);width:20px;border-radius:4px;}
-  .onboard__actions{display:flex;flex-direction:column;gap:0.75rem;}
-  .name-input, .lang-radio{width:100%;}
-  .name-input input{
-    width:100%;padding:0.85rem 1rem;border-radius:12px;
-    border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);
-    color:#fff;font-size:1rem;font-family:var(--font-body);margin-top:1.5rem;
+}
+
+// A distinct, longer ringtone (3-note pattern, different timbre from the
+// connect chime) that repeats every 2.5s until answered or cancelled — like
+// a real incoming call, not a one-off notification sound.
+let ringInterval = null;
+
+function playRingTone() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    [523.25, 659.25, 783.99].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = freq;
+      osc.type = "triangle";
+      gain.gain.setValueAtTime(0.0001, now + i * 0.15);
+      gain.gain.exponentialRampToValueAtTime(0.22, now + i * 0.15 + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.15 + 0.35);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now + i * 0.15);
+      osc.stop(now + i * 0.15 + 0.4);
+    });
+  } catch (err) {
+    console.error("Ring tone failed:", err);
   }
-  .name-input input::placeholder{color:rgba(255,255,255,.4);}
-  .lang-radio{display:flex;flex-direction:column;gap:0.6rem;margin-top:1.75rem;}
-  .lang-option{
-    display:flex;align-items:center;gap:0.75rem;
-    padding:0.85rem 1rem;border-radius:12px;
-    border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.05);
-    cursor:pointer;text-align:left;font-size:0.95rem;
+}
+
+function startRinging() {
+  stopRinging();
+  playRingTone();
+  ringInterval = setInterval(playRingTone, 2500);
+}
+
+function stopRinging() {
+  if (ringInterval) {
+    clearInterval(ringInterval);
+    ringInterval = null;
   }
-  .lang-option.selected{border-color:var(--gold);background:rgba(245,195,107,.12);}
-  .lang-option input{accent-color:var(--gold);}
-  .screen{display:none;}
-  .screen.active{display:flex;flex-direction:column;flex:1;}
-</style>
-</head>
-<body>
+}
 
-<div class="onboard">
-  <button class="onboard__skip" id="skipBtn">Skip</button>
+function setupCallEvents() {
+  activeCall.on("stream", (remoteStream) => {
+    stopRinging();
+    const banner = document.getElementById("incomingCallBanner");
+    if (banner) banner.style.display = "none";
+    const remoteAudio = document.getElementById("remoteAudio");
+    remoteAudio.srcObject = remoteStream;
+    remoteAudio.play().catch(() => {});
+    setConnectStatus("Connected — just talk, no buttons needed", true);
+    playChime();
+    const ringBtn = document.getElementById("ringBtn");
+    if (ringBtn) ringBtn.style.display = "none";
+    const hangupBtn = document.getElementById("hangupBtn");
+    if (hangupBtn) hangupBtn.style.display = "block";
+    // Phone-call feel: listening starts automatically once connected —
+    // no need to tap the mic at all.
+    startListening();
+  });
+  activeCall.on("close", () => setConnectStatus("Call ended", false));
+  activeCall.on("error", (err) => console.error("Call error:", err));
+}
 
-  <!-- Screen 1 -->
-  <div class="screen active" data-screen="1">
-    <div class="onboard__body">
-      <div class="brand-mark" style="justify-content:center;height:26px;margin-bottom:1.5rem;">
-        <span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span>
-      </div>
-      <h1>Welcome to TalkConnect</h1>
-      <p>Speak your language, out loud. The pioneer on the other end hears theirs — no typing, no waiting.</p>
-    </div>
-  </div>
-
-  <!-- Screen 2 -->
-  <div class="screen" data-screen="2">
-    <div class="onboard__body">
-      <div class="onboard__icon">🗣️</div>
-      <h1>Talk business, freely</h1>
-      <p>Negotiate a price, close a deal, or just catch up with a fellow pioneer — language is no longer the barrier.</p>
-    </div>
-  </div>
-
-  <!-- Screen 3: name -->
-  <div class="screen" data-screen="3">
-    <div class="onboard__body">
-      <div class="onboard__icon">👋</div>
-      <h1>What should we call you?</h1>
-      <p>This is just for your demo session on this device — no account needed yet.</p>
-      <div class="name-input">
-        <input type="text" id="nameInput" placeholder="Your name" />
-      </div>
-    </div>
-  </div>
-
-  <!-- Screen 4: language -->
-  <div class="screen" data-screen="4">
-    <div class="onboard__body">
-      <div class="onboard__icon">🌍</div>
-      <h1>Which language do you speak?</h1>
-      <p>You can change this anytime in the app.</p>
-      <div class="lang-radio" id="langRadio">
-        <label class="lang-option"><input type="radio" name="lang" value="English" checked> 🇬🇧 English</label>
-        <label class="lang-option"><input type="radio" name="lang" value="French"> 🇫🇷 French</label>
-        <label class="lang-option"><input type="radio" name="lang" value="Chinese (Mandarin)"> 🇨🇳 Chinese (Mandarin)</label>
-      </div>
-    </div>
-  </div>
-
-  <div class="onboard__dots" id="dots">
-    <span class="active"></span><span></span><span></span><span></span>
-  </div>
-
-  <div class="onboard__actions">
-    <button class="btn btn--primary" id="nextBtn">Continue</button>
-  </div>
-</div>
-
-<script>
-  const screens = document.querySelectorAll(".screen");
-  const dots = document.querySelectorAll("#dots span");
-  const nextBtn = document.getElementById("nextBtn");
-  const skipBtn = document.getElementById("skipBtn");
-  let step = 1;
-  const total = screens.length;
-
-  function render() {
-    screens.forEach(s => s.classList.toggle("active", Number(s.dataset.screen) === step));
-    dots.forEach((d, i) => d.classList.toggle("active", i === step - 1));
-    nextBtn.textContent = step === total ? "Start using TalkConnect" : "Continue";
-  }
-
-  function finishOnboarding() {
-    const name = document.getElementById("nameInput").value.trim();
-    const lang = document.querySelector('input[name="lang"]:checked').value;
-
-    let prefs = {};
-    try { prefs = JSON.parse(localStorage.getItem("pitalk_prefs_v1")) || {}; } catch {}
-    prefs.langYou = lang;
-    prefs.displayName = name || "Pioneer";
-    prefs.onboarded = true;
-    localStorage.setItem("pitalk_prefs_v1", JSON.stringify(prefs));
-
-    window.location.href = "index.html";
-  }
-
-  nextBtn.addEventListener("click", () => {
-    if (step < total) {
-      step++;
-      render();
-    } else {
-      finishOnboarding();
+function setupDataConnEvents() {
+  dataConn.on("data", (data) => {
+    if (data && data.type === "caption") {
+      transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data.text}</p>`;
+      // If StreamElements audio doesn't arrive shortly after, speak the
+      // caption locally instead. audioHandledForCurrentTurn is a hard lock —
+      // whichever path (real audio or local fallback) fires FIRST wins, and
+      // the other is skipped, so the voice can never play twice.
+      audioHandledForCurrentTurn = false;
+      pendingCaptionForFallback = data.text;
+      clearTimeout(fallbackSpeakTimer);
+      fallbackSpeakTimer = setTimeout(() => {
+        if (!audioHandledForCurrentTurn && pendingCaptionForFallback === data.text) {
+          audioHandledForCurrentTurn = true;
+          console.log("[TalkConnect] No audio arrived — falling back to local device voice.");
+          speakLocally(data.text, (document.getElementById("langYou") || {}).value);
+        }
+      }, 3500);
+    } else if (data && data.type === "joined") {
+      // The other pioneer connected — the host can now ring them.
+      const ringBtn = document.getElementById("ringBtn");
+      if (ringBtn) ringBtn.style.display = "inline-block";
+      setConnectStatus("Your pioneer joined — tap Ring to alert them", false);
+    } else if (data && data.type === "ring") {
+      const banner = document.getElementById("incomingCallBanner");
+      if (banner) banner.style.display = "block";
+      startRinging();
+      setConnectStatus("📳 Incoming call…", false);
+    } else if (data && data.type === "audio" && data.buffer) {
+      console.log("[TalkConnect] Audio received over data channel, bytes:", data.buffer.byteLength);
+      if (audioHandledForCurrentTurn) {
+        console.log("[TalkConnect] Local fallback already spoke this turn — skipping real audio to avoid double voice.");
+        return;
+      }
+      audioHandledForCurrentTurn = true;
+      pendingCaptionForFallback = null;
+      clearTimeout(fallbackSpeakTimer);
+      try {
+        const blob = new Blob([data.buffer], { type: "audio/mpeg" });
+        const blobUrl = URL.createObjectURL(blob);
+        const audio = new Audio(blobUrl);
+        audio.onplay = () => console.log("[TalkConnect] Received audio playback started.");
+        audio.onended = () => URL.revokeObjectURL(blobUrl);
+        audio.play().catch((err) => console.error("[TalkConnect] Playback of received translation failed:", err));
+      } catch (err) {
+        console.error("[TalkConnect] Could not play received translation audio:", err);
+      }
+    } else if (typeof data === "string") {
+      // Backward-compatible fallback for plain-text messages.
+      transcript.innerHTML += `<p style="margin-top:.5rem;color:#9B5CE0;"><strong>Them:</strong> ${data}</p>`;
     }
   });
+  dataConn.on("error", (err) => console.error("Data channel error:", err));
+}
 
-  skipBtn.addEventListener("click", finishOnboarding);
+// Generates the spoken translation audio (StreamElements) and sends it to
+// the connected pioneer over the data channel, so THEY hear the translation
+// in their own language — the live call audio alone only carries your raw
+// voice in your own language.
+async function sendSpokenTranslation(text, targetLangObj) {
+  console.log("[TalkConnect] sendSpokenTranslation() called with:", text);
+  const voice = getVoiceId(targetLangObj.iso);
+  const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text.slice(0, 500))}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Speech request failed: ${res.status}`);
+    const buffer = await res.arrayBuffer();
+    console.log("[TalkConnect] TTS audio generated, bytes:", buffer.byteLength);
+    if (dataConn && dataConn.open) {
+      dataConn.send({ type: "audio", buffer });
+      console.log("[TalkConnect] Audio buffer sent over data channel.");
+    }
+  } catch (err) {
+    console.error("[TalkConnect] Could not generate/send spoken translation:", err);
+    transcript.innerHTML += `<p style="color:rgba(255,255,255,.45);font-size:.78rem;">🔇 Couldn't generate spoken audio this time — text translation was still sent.</p>`;
+  }
+}
 
-  document.querySelectorAll('input[name="lang"]').forEach(input => {
-    input.addEventListener("change", () => {
-      document.querySelectorAll(".lang-option").forEach(opt => opt.classList.remove("selected"));
-      input.closest(".lang-option").classList.add("selected");
-    });
+// Generates a genuinely silent audio track (Web Audio API) for the WebRTC
+// call leg. We intentionally do NOT use a real microphone stream here:
+// holding a second live getUserMedia() capture open at the same time as
+// SpeechRecognition's own internal mic access caused recognition to fail
+// silently on Android Chrome (two simultaneous mic consumers in one tab).
+// The other pioneer only ever hears the translated audio anyway (sent over
+// the data channel), so real mic audio was never needed on this track.
+function createSilentAudioStream() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const destination = ctx.createMediaStreamDestination();
+  const oscillator = ctx.createOscillator();
+  const gain = ctx.createGain();
+  gain.gain.value = 0; // true silence, not just a disabled track
+  oscillator.connect(gain).connect(destination);
+  oscillator.start();
+  return destination.stream;
+}
+
+async function startCall() {
+  if (typeof Peer === "undefined") {
+    alert("Calling isn't available right now — please reload the page.");
+    return;
+  }
+  try {
+    localCallStream = createSilentAudioStream();
+  } catch (err) {
+    console.error("Could not create call audio track:", err);
+    alert("Couldn't start the call audio channel — please reload and try again.");
+    return;
+  }
+
+  const code = getOrCreateRoomCode();
+  const fullId = "talkconnect-" + code;
+  isCallHost = true;
+  peerConn = new Peer(fullId);
+
+  peerConn.on("open", () => {
+    document.getElementById("roomCodeText").textContent = code;
+    document.getElementById("roomCodeDisplay").style.display = "block";
+    setConnectStatus("Waiting for the other pioneer to join…", false);
+    setupShareLinkButton(code);
+    showRoomQrCode(code);
+    showSaveFavoritePrompt();
   });
 
-  render();
-</script>
+  peerConn.on("call", (incomingCall) => {
+    incomingCall.answer(localCallStream);
+    activeCall = incomingCall;
+    setupCallEvents();
+  });
 
-</body>
-</html>
+  peerConn.on("connection", (conn) => {
+    dataConn = conn;
+    setupDataConnEvents();
+  });
+
+  peerConn.on("error", (err) => {
+    console.error("Peer error:", err);
+    if (err.type === "unavailable-id") {
+      // A previous session with this same code is still registered
+      // (e.g. this device didn't close cleanly) — show the code anyway
+      // since it's still yours, just note the reconnect.
+      document.getElementById("roomCodeText").textContent = code;
+      document.getElementById("roomCodeDisplay").style.display = "block";
+      setConnectStatus("Reconnecting to your existing room…", false);
+      setupShareLinkButton(code);
+    } else {
+      setConnectStatus("Connection error — try again.", false);
+    }
+  });
+}
+
+let targetHostId = null;
+
+async function joinCall(rawCode) {
+  if (typeof Peer === "undefined") {
+    alert("Calling isn't available right now — please reload the page.");
+    return;
+  }
+  try {
+    localCallStream = createSilentAudioStream();
+  } catch (err) {
+    console.error("Could not create call audio track:", err);
+    alert("Couldn't start the call audio channel — please reload and try again.");
+    return;
+  }
+
+  const fullId = "talkconnect-" + rawCode.trim().toUpperCase();
+  targetHostId = fullId;
+  isCallHost = false;
+  peerConn = new Peer();
+
+  peerConn.on("open", () => {
+    setConnectStatus("Connecting…", false);
+    dataConn = peerConn.connect(fullId);
+    setupDataConnEvents();
+    dataConn.on("open", () => {
+      dataConn.send({ type: "joined" });
+      setConnectStatus("Waiting for your pioneer to ring you…", false);
+    });
+    showSaveFavoritePrompt();
+  });
+
+  // In case the host calls us directly (fallback path).
+  peerConn.on("call", (incomingCall) => {
+    incomingCall.answer(localCallStream);
+    activeCall = incomingCall;
+    setupCallEvents();
+  });
+
+  peerConn.on("error", (err) => {
+    console.error("Peer error:", err);
+    setConnectStatus("Couldn't connect — check the code and try again.", false);
+  });
+}
+
+// Called when the joiner taps "Answer" on the incoming-call banner — this is
+// the moment the real audio call actually starts, on purpose (like actually
+// picking up a ringing phone, instead of connecting silently in the background).
+function answerCall() {
+  stopRinging();
+  const banner = document.getElementById("incomingCallBanner");
+  if (banner) banner.style.display = "none";
+  if (!peerConn || !targetHostId) return;
+  activeCall = peerConn.call(targetHostId, localCallStream);
+  setupCallEvents();
+}
+
+
+const TRANSLATE_ENDPOINT = "https://api.mymemory.translated.net/get";
+
+// TODO: replace with your real backend once it exists.
+// Your backend should receive the accessToken, call
+// GET https://api.minepi.com/v2/me with Authorization: Bearer <accessToken>,
+// and only then create a session. No Pi API key is required for this call.
+const BACKEND_BASE_URL = ""; // e.g. "https://your-backend.example.com"
+
+const LANG_CODES = {
+  "English": { bcp47: "en-US", iso: "en" },
+  "French": { bcp47: "fr-FR", iso: "fr" },
+  "Chinese (Mandarin)": { bcp47: "zh-CN", iso: "zh" },
+};
+
+let currentUser = null;
+let piInitPromise = null;
+
+function loadPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function savePrefs(prefs) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+  } catch (e) {
+    console.warn("Failed to save preferences:", e);
+  }
+}
+
+const micBtn = document.getElementById("micBtn");
+const statusText = document.getElementById("phoneStatusText");
+const statusDot = document.querySelector(".dot");
+const transcript = document.getElementById("transcript");
+const authBtn = document.getElementById("authBtn");
+const clearBtn = document.getElementById("clearBtn");
+
+function setStatus(text, color) {
+  if (statusText) statusText.textContent = text;
+  if (statusDot) statusDot.style.background = color;
+}
+
+// Wrap a promise so it fails loudly instead of hanging forever — outside the
+// real Pi Browser, Pi.authenticate() can sit unresolved with no error at all.
+function withTimeout(promise, ms, timeoutMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMessage)), ms)),
+  ]);
+}
+
+// ---- Pi SDK init, treated as a Promise so callers can fully await it ----
+function ensurePiInit() {
+  if (piInitPromise) return piInitPromise;
+  piInitPromise = new Promise((resolve, reject) => {
+    if (typeof Pi === "undefined") {
+      reject(new Error("Pi SDK not available (not running inside the Pi Browser)."));
+      return;
+    }
+    try {
+      const result = Pi.init({ version: "2.0", sandbox: true }); // Testnet — matches this app's Developer Portal registration
+      // Pi.init may or may not return a promise depending on SDK version — support both.
+      Promise.resolve(result).then(resolve).catch(resolve);
+    } catch (err) {
+      reject(err);
+    }
+  });
+  return piInitPromise;
+}
+
+// ---- Validate the access token before establishing a "session" client-side ----
+async function validateWithBackend(accessToken) {
+  if (BACKEND_BASE_URL) {
+    const res = await fetch(`${BACKEND_BASE_URL}/auth/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accessToken }),
+    });
+    if (!res.ok) throw new Error("Backend validation failed");
+    return res.json();
+  }
+
+  // Temporary client-side fallback for testing only (see warning above).
+  const res = await fetch("https://api.minepi.com/v2/me", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error("Pi token validation failed");
+  return res.json();
+}
+
+const startCallBtn = document.getElementById("startCallBtn");
+const joinCallBtn = document.getElementById("joinCallBtn");
+const connectBtn = document.getElementById("connectBtn");
+const joinCodeRow = document.getElementById("joinCodeRow");
+const roomCodeInput = document.getElementById("roomCodeInput");
+
+if (startCallBtn) {
+  startCallBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
+    startCallBtn.classList.add("active");
+    if (joinCodeRow) joinCodeRow.style.display = "none";
+    startCall();
+  });
+}
+if (joinCallBtn) {
+  joinCallBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
+    joinCallBtn.classList.add("active");
+    if (joinCodeRow) joinCodeRow.style.display = "flex";
+  });
+}
+if (connectBtn) {
+  connectBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
+    const code = roomCodeInput ? roomCodeInput.value : "";
+    if (code.trim()) joinCall(code);
+  });
+}
+
+function setupShareLinkButton(code) {
+  const shareBtn = document.getElementById("shareLinkBtn");
+  if (!shareBtn) return;
+  const link = `${window.location.origin}${window.location.pathname}?room=${code}`;
+
+  shareBtn.onclick = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: "Join me on TalkConnect",
+          text: "Tap to join our real-time translated call:",
+          url: link,
+        });
+        return;
+      } catch (err) {
+        // User cancelled the share sheet, or it failed — fall through to copy.
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(link);
+      shareBtn.textContent = "✅ Link copied!";
+      setTimeout(() => (shareBtn.textContent = "📤 Share invite link"), 2000);
+    } catch (err) {
+      alert(`Copy this link:\n${link}`);
+    }
+  };
+}
+
+// Generates a QR code image for the invite link — using a free image API
+// (no library/account needed) so the other pioneer can just scan instead of
+// typing the code, handy when you're together in person.
+function showRoomQrCode(code) {
+  const img = document.getElementById("roomQrCode");
+  if (!img) return;
+  const link = `${window.location.origin}${window.location.pathname}?room=${code}`;
+  img.src = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(link)}`;
+}
+
+// ---- Saved pioneers (favorites) ----
+const FAVORITES_KEY = "talkconnect_favorites_v1";
+
+function loadFavorites() {
+  try {
+    return JSON.parse(localStorage.getItem(FAVORITES_KEY)) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveFavorites(list) {
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify(list));
+}
+
+function renderFavorites() {
+  const list = loadFavorites();
+  const listEl = document.getElementById("favoritesList");
+  const emptyEl = document.getElementById("favoritesEmpty");
+  if (!listEl) return;
+
+  listEl.querySelectorAll(".favorite-item").forEach((el) => el.remove());
+  if (emptyEl) emptyEl.style.display = list.length ? "none" : "block";
+
+  list.forEach((fav) => {
+    const row = document.createElement("div");
+    row.className = "favorite-item";
+    row.innerHTML = `
+      <div>
+        <div class="favorite-item__name">${fav.name}</div>
+        <div class="favorite-item__code">${fav.code}</div>
+      </div>
+      <div class="favorite-item__actions">
+        <button type="button" data-action="call">📞 Call</button>
+        <button type="button" data-action="remove" class="remove">✕</button>
+      </div>
+    `;
+    row.querySelector('[data-action="call"]').addEventListener("click", () => {
+      if (joinCodeRow) joinCodeRow.style.display = "flex";
+      if (roomCodeInput) roomCodeInput.value = fav.code;
+      joinCall(fav.code);
+    });
+    row.querySelector('[data-action="remove"]').addEventListener("click", () => {
+      saveFavorites(loadFavorites().filter((f) => f.code !== fav.code));
+      renderFavorites();
+    });
+    listEl.appendChild(row);
+  });
+}
+
+// Once connected (as host or joiner), offer to save the current contact.
+function showSaveFavoritePrompt() {
+  const row = document.getElementById("favoritesAddRow");
+  if (row) row.style.display = "flex";
+}
+
+function wireFavoriteSaveButton(getCurrentCode) {
+  const saveBtn = document.getElementById("saveFavoriteBtn");
+  const nameInput = document.getElementById("favoriteNameInput");
+  if (!saveBtn) return;
+  saveBtn.addEventListener("click", () => {
+    const code = getCurrentCode();
+    const name = (nameInput && nameInput.value.trim()) || "Pioneer";
+    if (!code) return;
+    const list = loadFavorites().filter((f) => f.code !== code);
+    list.push({ name, code });
+    saveFavorites(list);
+    renderFavorites();
+    if (nameInput) nameInput.value = "";
+  });
+}
+
+renderFavorites();
+wireFavoriteSaveButton(() => {
+  const text = document.getElementById("roomCodeText");
+  if (text && text.textContent && text.textContent !== "—") return text.textContent;
+  return roomCodeInput ? roomCodeInput.value.trim().toUpperCase() : "";
+});
+
+// If this page was opened via a shared invite link (?room=CODE), jump
+// straight into joining that call instead of showing the start/join menu.
+function checkForInviteLink() {
+  const params = new URLSearchParams(window.location.search);
+  const room = params.get("room");
+  if (room && roomCodeInput && joinCodeRow) {
+    roomCodeInput.value = room;
+    joinCodeRow.style.display = "flex";
+    if (joinCallBtn) joinCallBtn.classList.add("active");
+    joinCall(room);
+  }
+}
+checkForInviteLink();
+
+const ringBtn = document.getElementById("ringBtn");
+if (ringBtn) {
+  ringBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
+    if (dataConn && dataConn.open) {
+      dataConn.send({ type: "ring" });
+      setConnectStatus("📞 Ringing your pioneer…", false);
+      ringBtn.style.display = "none";
+    }
+  });
+}
+
+const answerBtn = document.getElementById("answerBtn");
+if (answerBtn) {
+  answerBtn.addEventListener("click", () => {
+    unlockAudioPlayback();
+    unlockSpeechSynthesis();
+    answerCall();
+  });
+}
+
+// Fully ends the call: stops listening, releases the microphone, and closes
+// every connection — like actually hanging up a phone, not just pausing.
+function hangUp() {
+  stopRinging();
+  const banner = document.getElementById("incomingCallBanner");
+  if (banner) banner.style.display = "none";
+  targetHostId = null;
+  try {
+    if (recognition) recognition.stop();
+  } catch {}
+  micState = "idle";
+  if (micBtn) micBtn.classList.remove("recording", "paused");
+  if (micHint) micHint.textContent = "Tap to start talking";
+  if (endBtn) endBtn.style.display = "none";
+
+  try {
+    if (activeCall) activeCall.close();
+  } catch {}
+  try {
+    if (dataConn) dataConn.close();
+  } catch {}
+  try {
+    if (peerConn) peerConn.destroy();
+  } catch {}
+  if (localCallStream) {
+    localCallStream.getTracks().forEach((t) => t.stop());
+  }
+  activeCall = null;
+  dataConn = null;
+  peerConn = null;
+  localCallStream = null;
+
+  const hangupBtn = document.getElementById("hangupBtn");
+  if (hangupBtn) hangupBtn.style.display = "none";
+  if (ringBtn) ringBtn.style.display = "none";
+  document.getElementById("roomCodeDisplay").style.display = "none";
+  if (startCallBtn) startCallBtn.classList.remove("active");
+  if (joinCallBtn) joinCallBtn.classList.remove("active");
+  if (joinCodeRow) joinCodeRow.style.display = "none";
+
+  setConnectStatus("Solo demo — not connected to another pioneer", false);
+  setStatus("Ready", "#5EE0A0");
+  transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
+}
+
+const hangupBtnEl = document.getElementById("hangupBtn");
+if (hangupBtnEl) hangupBtnEl.addEventListener("click", hangUp);
+
+const newCodeBtn = document.getElementById("newCodeBtn");
+if (newCodeBtn) {
+  newCodeBtn.addEventListener("click", () => {
+    const code = regenerateRoomCode();
+    document.getElementById("roomCodeText").textContent = code;
+    setupShareLinkButton(code);
+    showRoomQrCode(code);
+  });
+}
+
+const voiceFemaleBtn = document.getElementById("voiceFemaleBtn");
+const voiceMaleBtn = document.getElementById("voiceMaleBtn");
+function applyVoiceGenderUI(gender) {
+  if (voiceFemaleBtn) voiceFemaleBtn.classList.toggle("active", gender !== "male");
+  if (voiceMaleBtn) voiceMaleBtn.classList.toggle("active", gender === "male");
+}
+if (voiceFemaleBtn) {
+  voiceFemaleBtn.addEventListener("click", () => {
+    savePrefs({ ...loadPrefs(), voiceGender: "female" });
+    applyVoiceGenderUI("female");
+  });
+}
+if (voiceMaleBtn) {
+  voiceMaleBtn.addEventListener("click", () => {
+    savePrefs({ ...loadPrefs(), voiceGender: "male" });
+    applyVoiceGenderUI("male");
+  });
+}
+applyVoiceGenderUI(loadPrefs().voiceGender);
+
+document.addEventListener("DOMContentLoaded", () => {
+  const prefs = loadPrefs();
+
+  if (!prefs.onboarded && !window.location.pathname.includes("onboarding.html")) {
+    window.location.href = "onboarding.html";
+    return;
+  }
+
+  const langYou = document.getElementById("langYou");
+  const langThem = document.getElementById("langThem");
+
+  if (langYou && prefs.langYou) langYou.value = prefs.langYou;
+  if (langThem && prefs.langThem) langThem.value = prefs.langThem;
+
+  const eyebrow = document.querySelector(".eyebrow");
+  if (eyebrow && prefs.displayName) {
+    eyebrow.textContent = `Welcome back, ${prefs.displayName} · Real-time voice translation`;
+  }
+
+  if (langYou && langThem) {
+    [langYou, langThem].forEach((sel) => {
+      sel.addEventListener("change", () => {
+        savePrefs({ ...loadPrefs(), langYou: langYou.value, langThem: langThem.value });
+      });
+    });
+  }
+
+  if (prefs.activePlan) {
+    const activeBtn = document.querySelector(`.btn--plan[data-plan="${prefs.activePlan}"]`);
+    if (activeBtn) activeBtn.textContent = "Subscribed ✓";
+  }
+
+  // Auto-trigger Pi authentication on load (silent — no alert if unavailable/declined)
+  signInWithPi({ silent: true });
+});
+
+const tryDemoBtn = document.getElementById("tryDemoBtn");
+if (tryDemoBtn) {
+  tryDemoBtn.addEventListener("click", () => {
+    const demoSection = document.getElementById("demo");
+    if (demoSection) demoSection.scrollIntoView({ behavior: "smooth" });
+  });
+}
+
+// Real spoken output via a free TTS endpoint (StreamElements — no account, no
+// key, no sign-in required for the end user) that returns an actual playable
+// audio file. This avoids depending on the device's own voice engine, which
+// the Pi Browser's WebView often lacks. Note: this is an unofficial, free
+// community endpoint, not a documented paid service — fine for testing, but
+// should be replaced with a proper paid TTS provider before a real launch.
+const STREAMELEMENTS_VOICES = {
+  en: { female: "Joanna", male: "Matthew" },
+  fr: { female: "Celine", male: "Mathieu" },
+  zh: { female: "Zhiyu", male: "Zhiyu" }, // no distinct male Mandarin voice available on this free service
+};
+
+function getVoiceId(iso) {
+  const prefs = loadPrefs();
+  const gender = prefs.voiceGender === "male" ? "male" : "female";
+  const entry = STREAMELEMENTS_VOICES[iso] || STREAMELEMENTS_VOICES.en;
+  return entry[gender] || entry.female;
+}
+
+async function speakTranslation(translatedText, targetLangObj) {
+  const voice = getVoiceId(targetLangObj.iso);
+  const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(translatedText.slice(0, 500))}`;
+
+  try {
+    setStatus("Speaking output…", "#5EE0A0");
+    // Fetch the audio bytes ourselves (like our translation requests already
+    // do successfully) instead of pointing <audio> straight at the remote
+    // URL — some WebViews (Pi Browser included, it seems) restrict direct
+    // JS-initiated cross-origin media loads even though a plain page
+    // navigation to the same URL works fine.
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Speech request failed: ${res.status}`);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+
+    await new Promise((resolve, reject) => {
+      const audio = new Audio(blobUrl);
+      audio.onended = () => {
+        URL.revokeObjectURL(blobUrl);
+        resolve();
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(blobUrl);
+        reject(new Error("Blob audio playback failed"));
+      };
+      audio.play().catch(reject);
+    });
+    return;
+  } catch (err) {
+    console.error("Cloud speech (StreamElements) failed, falling back to device voice:", err);
+  }
+
+  // Fallback: the device/browser's own voice engine, if it has one.
+  if ("speechSynthesis" in window) {
+    const voices = window.speechSynthesis.getVoices();
+    const targetPrefix = targetLangObj.bcp47.split("-")[0].toLowerCase();
+    const matchingVoice = voices.find(
+      (v) => v.lang && v.lang.toLowerCase().startsWith(targetPrefix)
+    );
+
+    await new Promise((resolve) => {
+      const utter = new SpeechSynthesisUtterance(translatedText);
+      utter.lang = targetLangObj.bcp47;
+      utter.rate = 0.88;
+      if (matchingVoice) utter.voice = matchingVoice;
+      utter.onstart = () => setStatus("Speaking output…", "#5EE0A0");
+      utter.onend = resolve;
+      utter.onerror = () => {
+        transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 Spoken playback isn't available right now — showing translation as text only.</p>`;
+        resolve();
+      };
+      window.speechSynthesis.speak(utter);
+      setTimeout(resolve, 5000); // safety net if neither event ever fires
+    });
+  } else {
+    transcript.innerHTML += `<p style="margin-top:.5rem;color:rgba(255,255,255,.5);font-size:.82rem;">🔇 No spoken playback available on this device — text translation only.</p>`;
+  }
+}
+
+// MyMemory truncates/rejects long queries, so split into sentence-sized
+// chunks and translate each in turn — this avoids ever cutting off mid-
+// sentence on longer conversations (multiple speak/pause turns before End).
+// Tries Lingva Translate first (proxies real Google Translate — much better
+// quality than MyMemory's translation-memory matching, which sometimes
+// returns a completely unrelated "closest match" phrase instead of a real
+// translation). Falls back to MyMemory if Lingva's public instance is down.
+async function translateChunk(chunk, sourceLang, targetLang) {
+  try {
+    const res = await fetch(
+      `https://lingva.ml/api/v1/${sourceLang}/${targetLang}/${encodeURIComponent(chunk)}`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.translation) return data.translation;
+    }
+    throw new Error("Lingva unavailable");
+  } catch (err) {
+    console.warn("[TalkConnect] Lingva failed, falling back to MyMemory:", err);
+    const params = new URLSearchParams({
+      q: chunk.slice(0, 500),
+      langpair: `${sourceLang}|${targetLang}`,
+    });
+    const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
+    const data = await res.json();
+    if (data.responseStatus !== 200 || !data.responseData) {
+      throw new Error(data.responseDetails || "Translation failed");
+    }
+    return data.responseData.translatedText;
+  }
+}
+
+async function translateLongText(text, sourceLang, targetLang) {
+  const sentences = text.match(/[^.!?]+[.!?]*(\s+|$)/g) || [text];
+  const chunks = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    if ((current + sentence).length > 450 && current) {
+      chunks.push(current.trim());
+      current = sentence;
+    } else {
+      current += sentence;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+
+  const translatedParts = [];
+  for (const chunk of chunks) {
+    translatedParts.push(await translateChunk(chunk, sourceLang, targetLang));
+  }
+  return translatedParts.join(" ");
+}
+const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+const endBtn = document.getElementById("endBtn");
+const micHint = document.getElementById("micHint");
+let recognition = null;
+let recognizedText = "";
+let finalTranscript = "";
+let micState = "idle"; // idle | listening | paused
+let speechUnlocked = false;
+
+// Many mobile browsers only allow speechSynthesis.speak() if it has been
+// called at least once directly inside a user gesture (tap). Our real speak()
+// call happens later, after an async translation request, which can be too
+// late for some mobile WebViews (like the one inside Pi Browser) — so we
+// "prime" the speech engine here, synchronously, on the very first tap.
+function unlockSpeechSynthesis() {
+  if (speechUnlocked || !("speechSynthesis" in window)) return;
+  const primer = new SpeechSynthesisUtterance(" ");
+  primer.volume = 0;
+  window.speechSynthesis.speak(primer);
+  speechUnlocked = true;
+}
+
+let audioUnlocked = false;
+// Same idea as unlockSpeechSynthesis, but for <audio>/StreamElements playback:
+// many browsers only allow audio.play() when it's directly tied to a user
+// gesture. Our real playback happens after an async translation request,
+// which is too late — so we "unlock" it here with a silent clip, played
+// synchronously inside the very first tap (like YouTube's one-time "unmute").
+function unlockAudioPlayback() {
+  if (audioUnlocked) return;
+  const silence = new Audio(
+    "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
+  );
+  silence.volume = 0.01;
+  silence.play().catch(() => {});
+  audioUnlocked = true;
+}
+
+// Chrome's "continuous" mode silently restarts its internal session every so
+// often, resetting result indices to 0 — accumulating on top of that caused
+// text to repeat and grow. Instead, we run short single-utterance sessions
+// (continuous: false) and explicitly restart them ourselves on `onend` while
+// we're still in the "listening" state, appending each session's final text
+// exactly once. Tapping pauses this cleanly; a separate End button finalizes.
+function startRecognitionSession(bcp47Lang) {
+  console.log("[TalkConnect] startRecognitionSession() called, lang:", bcp47Lang);
+  recognition = new SpeechRecognitionAPI();
+  recognition.lang = bcp47Lang;
+  recognition.interimResults = true;
+  recognition.continuous = false;
+
+  recognition.onstart = () => {
+    console.log("[TalkConnect] SpeechRecognition actually started.");
+  };
+
+  recognition.onresult = (event) => {
+    console.log("[TalkConnect] onresult fired.", event.results);
+    let interimText = "";
+    for (let i = 0; i < event.results.length; i++) {
+      const piece = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        if (!finalTranscript.endsWith(piece.trim())) {
+          finalTranscript += piece + " ";
+        }
+      } else {
+        interimText += piece;
+      }
+    }
+    recognizedText = (finalTranscript + interimText).trim();
+    transcript.innerHTML = `<p><strong>You:</strong> ${recognizedText}</p>`;
+  };
+
+  recognition.onerror = (event) => {
+    console.error("Speech recognition error:", event.error);
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      transcript.innerHTML = `<p style="color:#E8546B;">🎤 Microphone permission was blocked. Please allow microphone access for this site and try again.</p>`;
+    } else if (event.error === "audio-capture") {
+      transcript.innerHTML = `<p style="color:#E8546B;">🎤 No microphone could be accessed on this device right now.</p>`;
+    } else if (event.error !== "no-speech" && event.error !== "aborted") {
+      transcript.innerHTML = `<p style="color:#E8546B;">⚠️ Voice recognition error: ${event.error}. Tap the mic to try again.</p>`;
+    }
+  };
+
+  recognition.onend = () => {
+    if (micState === "listening") {
+      // In a live call: treat each natural pause like a real conversation
+      // turn — translate and send automatically, then keep listening. No
+      // "End" button needed, just like a normal phone call.
+      if (dataConn && dataConn.open && finalTranscript.trim()) {
+        const capturedText = finalTranscript.trim();
+        finalTranscript = "";
+        recognizedText = "";
+        autoTranslateAndSend(capturedText);
+      }
+      startRecognitionSession(bcp47Lang);
+    }
+  };
+
+  try {
+    recognition.start();
+    console.log("[TalkConnect] recognition.start() called without throwing.");
+  } catch (err) {
+    console.error("[TalkConnect] Could not start recognition:", err);
+  }
+}
+
+// Called automatically after each natural pause during a live call — no
+// manual "End" button needed, like a real conversation turn.
+async function autoTranslateAndSend(rawText) {
+  const text = rawText.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
+  console.log("[TalkConnect] autoTranslateAndSend() called with:", text);
+  if (!text) return;
+
+  const langYouSel = document.getElementById("langYou");
+  const langThemSel = document.getElementById("langThem");
+  const sourceLang = (LANG_CODES[langYouSel.value] || LANG_CODES["English"]).iso;
+  const targetLangObj = LANG_CODES[langThemSel.value] || LANG_CODES["French"];
+
+  try {
+    console.log("[TalkConnect] Sending translation request…");
+    const translated = await translateLongText(text, sourceLang, targetLangObj.iso);
+    console.log("[TalkConnect] Translation received:", translated);
+    transcript.innerHTML += `<p style="margin-top:.4rem;"><strong>You:</strong> ${text}<br><span style="color:#F5C36B;">→ ${translated}</span></p>`;
+    if (clearBtn) clearBtn.style.display = "inline-block";
+
+    if (dataConn && dataConn.open) {
+      dataConn.send({ type: "caption", text: translated });
+      console.log("[TalkConnect] Caption sent over data channel.");
+      sendSpokenTranslation(translated, targetLangObj); // fire-and-forget, keeps listening responsive
+    }
+  } catch (err) {
+    console.error("[TalkConnect] Auto-translate failed:", err);
+  }
+}
+
+function startListening() {
+  console.log("[TalkConnect] startListening() called.");
+  if (!SpeechRecognitionAPI) {
+    alert("Your browser doesn't support live voice recognition. Please test in Chrome.");
+    return;
+  }
+
+  unlockSpeechSynthesis();
+  unlockAudioPlayback();
+
+  const langYouSel = document.getElementById("langYou");
+  const youLang = LANG_CODES[langYouSel.value] || LANG_CODES["English"];
+
+  micState = "listening";
+  startRecognitionSession(youLang.bcp47);
+
+  micBtn.classList.add("recording");
+  micBtn.classList.remove("paused");
+  setStatus("Listening…", "#F5C36B");
+  if (micHint) micHint.textContent = "Tap to pause";
+  if (endBtn) endBtn.style.display = "inline-block";
+  if (!finalTranscript) {
+    transcript.innerHTML = `<p class="transcript__placeholder">Listening… speak now.</p>`;
+  }
+}
+
+function pauseListening() {
+  micState = "paused";
+  if (recognition) recognition.stop();
+
+  micBtn.classList.remove("recording");
+  micBtn.classList.add("paused");
+  setStatus("Paused", "#9B5CE0");
+  if (micHint) micHint.textContent = "Tap to resume · End when done";
+}
+
+function handleMicTap(e) {
+  e.preventDefault();
+  console.log("[TalkConnect] Mic tapped. Current micState:", micState);
+  if (micState === "idle" || micState === "paused") {
+    startListening();
+  } else if (micState === "listening") {
+    pauseListening();
+  }
+}
+
+async function endConversation() {
+  micState = "idle";
+  if (recognition) recognition.stop();
+  micBtn.classList.remove("recording", "paused");
+  if (endBtn) endBtn.style.display = "none";
+  if (micHint) micHint.textContent = "Tap to start talking";
+
+  // Collapse immediate word repeats (e.g. "alors alors" -> "alors") — some
+  // browsers finalize the same short word twice at a pause.
+  const text = finalTranscript.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
+  finalTranscript = "";
+  recognizedText = "";
+
+  if (!text) {
+    setStatus("Ready", "#5EE0A0");
+    transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
+    return;
+  }
+
+  setStatus("Translating…", "#9B5CE0");
+
+  const langYouSel = document.getElementById("langYou");
+  const langThemSel = document.getElementById("langThem");
+  const sourceLang = (LANG_CODES[langYouSel.value] || LANG_CODES["English"]).iso;
+  const targetLangObj = LANG_CODES[langThemSel.value] || LANG_CODES["French"];
+  const targetLang = targetLangObj.iso;
+
+  try {
+    const translated = await translateLongText(text, sourceLang, targetLang);
+
+    transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#F5C36B;"><strong>Translation:</strong> ${translated}</p><p style="margin-top:.6rem;color:rgba(255,255,255,.4);font-size:.78rem;letter-spacing:.05em;">— END / FIN —</p>`;
+    if (clearBtn) clearBtn.style.display = "inline-block";
+
+    if (dataConn && dataConn.open) {
+      // In a live call: the translation is meant for the OTHER pioneer to
+      // hear in their language — send the caption and spoken audio to them
+      // instead of playing/showing it only on this device.
+      dataConn.send({ type: "caption", text: translated });
+      setStatus("Sending translation…", "#9B5CE0");
+      await sendSpokenTranslation(translated, targetLangObj);
+      setStatus("Ready", "#5EE0A0");
+    } else {
+      setStatus("Sending to speaker…", "#9B5CE0");
+      await speakTranslation(translated, targetLangObj);
+      setStatus("Ready", "#5EE0A0");
+    }
+  } catch (err) {
+    console.error("Translation request failed:", err);
+    transcript.innerHTML = `<p><strong>You:</strong> ${text}</p><p style="margin-top:.6rem;color:#E8546B;">Translation service unavailable right now — try again in a moment.</p>`;
+    setStatus("Ready", "#5EE0A0");
+  }
+}
+
+if (micBtn) {
+  micBtn.addEventListener("click", handleMicTap);
+}
+if (endBtn) {
+  endBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    endConversation();
+  });
+}
+
+if (clearBtn) {
+  clearBtn.addEventListener("click", () => {
+    transcript.innerHTML = `<p class="transcript__placeholder">Your live transcript will appear here during a call.</p>`;
+    clearBtn.style.display = "none";
+    setStatus("Ready", "#5EE0A0");
+  });
+}
+
+// ---- Swap "You speak" / "They hear" languages ----
+const swapBtn = document.getElementById("swapBtn");
+if (swapBtn) {
+  swapBtn.addEventListener("click", () => {
+    const langYouSel = document.getElementById("langYou");
+    const langThemSel = document.getElementById("langThem");
+    if (!langYouSel || !langThemSel) return;
+
+    const temp = langYouSel.value;
+    langYouSel.value = langThemSel.value;
+    langThemSel.value = temp;
+
+    savePrefs({ ...loadPrefs(), langYou: langYouSel.value, langThem: langThemSel.value });
+  });
+}
+
+// ---- Pi Authentication ----
+// Per Pi Network's integration requirements: Pi.init() is awaited as a
+// Promise before Pi.authenticate() runs, the "username" scope is used for
+// general sign-in, and the access token is validated (ideally server-side)
+// before a session is established.
+function onIncompletePaymentFound(payment) {
+  console.log("Incomplete payment found:", payment);
+}
+
+async function signInWithPi({ silent = false } = {}) {
+  if (typeof Pi === "undefined") {
+    if (!silent) alert("Open this app inside the Pi Browser to sign in with Pi.");
+    return null;
+  }
+  try {
+    await withTimeout(ensurePiInit(), 6000, "Pi SDK init timed out — not running inside the Pi Browser.");
+    const auth = await withTimeout(
+      Pi.authenticate(["username"], onIncompletePaymentFound),
+      10000,
+      "Pi sign-in timed out — this only works inside the real Pi Browser."
+    );
+
+    // Validate the token BEFORE treating the user as signed in.
+    await validateWithBackend(auth.accessToken);
+
+    currentUser = auth.user;
+    if (authBtn) authBtn.textContent = `Hi, ${auth.user.username}`;
+    return auth.user;
+  } catch (err) {
+    console.error("Pi authentication failed:", err);
+    if (!silent) alert("Sign-in didn't complete. Open this app inside the real Pi Browser and try again.");
+    return null;
+  }
+}
+
+if (authBtn) {
+  authBtn.addEventListener("click", () => signInWithPi({ silent: false }));
+}
+
+// ---- Subscription payments (requires the extra "payments" scope) ----
+async function signInForPayments() {
+  await withTimeout(ensurePiInit(), 6000, "Pi SDK init timed out — not running inside the Pi Browser.");
+  const auth = await withTimeout(
+    Pi.authenticate(["username", "payments"], onIncompletePaymentFound),
+    10000,
+    "Pi sign-in timed out — this only works inside the real Pi Browser."
+  );
+  await validateWithBackend(auth.accessToken);
+  currentUser = auth.user;
+  if (authBtn) authBtn.textContent = `Hi, ${auth.user.username}`;
+  return auth.user;
+}
+
+document.querySelectorAll(".btn--plan").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    if (typeof Pi === "undefined") {
+      alert("Open this app inside the Pi Browser to subscribe with Pi.");
+      return;
+    }
+
+    try {
+      await signInForPayments();
+    } catch (err) {
+      console.error("Payment sign-in failed:", err);
+      alert("Sign-in failed. Please try again from the Pi Browser.");
+      return;
+    }
+
+    const plan = btn.dataset.plan;
+    const amount = parseFloat(btn.dataset.amount);
+    const originalLabel = btn.textContent;
+    btn.textContent = "Processing…";
+    btn.disabled = true;
+
+    try {
+      await Pi.createPayment(
+        {
+          amount: amount,
+          memo: `TalkConnect — ${plan} plan`,
+          metadata: { plan },
+        },
+        {
+          onReadyForServerApproval: (paymentId) => {
+            console.log("Send to backend for approval:", paymentId);
+          },
+          onReadyForCompletion: (paymentId, txid) => {
+            console.log("Send to backend for completion:", paymentId, txid);
+            savePrefs({ ...loadPrefs(), activePlan: plan, subscribedAt: Date.now() });
+            btn.textContent = "Subscribed ✓";
+          },
+          onCancel: (paymentId) => {
+            console.log("Payment cancelled:", paymentId);
+            btn.textContent = originalLabel;
+            btn.disabled = false;
+          },
+          onError: (error, payment) => {
+            console.error("Payment error:", error, payment);
+            btn.textContent = originalLabel;
+            btn.disabled = false;
+          },
+        }
+      );
+    } catch (err) {
+      console.error("createPayment failed:", err);
+      btn.textContent = originalLabel;
+      btn.disabled = false;
+    }
+  });
+});
