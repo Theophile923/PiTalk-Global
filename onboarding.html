@@ -123,11 +123,11 @@
     const lang = document.querySelector('input[name="lang"]:checked').value;
 
     let prefs = {};
-    try { prefs = JSON.parse(localStorage.getItem("pitalk_prefs_v1")) || {}; } catch {}
+    try { prefs = JSON.parse(localStorage.getItem("talkconnect_prefs_v1")) || {}; } catch {}
     prefs.langYou = lang;
     prefs.displayName = name || "Pioneer";
     prefs.onboarded = true;
-    localStorage.setItem("pitalk_prefs_v1", JSON.stringify(prefs));
+    localStorage.setItem("talkconnect_prefs_v1", JSON.stringify(prefs));
 
     window.location.href = "index.html";
   }
