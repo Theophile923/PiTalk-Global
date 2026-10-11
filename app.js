@@ -21,6 +21,17 @@
    - Persistence uses localStorage until this app is officially
      registered in Pi App Studio and can use its real multi-device
      persistent storage instead.
+
+   ---- CHANGES (this version) ----
+   1. Call turns no longer fire on every micro-pause. A short timer
+      (CALL_TURN_SILENCE_MS) now waits for a REAL pause before
+      treating your speech as "done" and sending the translation —
+      see scheduleCallTurn() / CALL_TURN_SILENCE_MS below.
+   2. translateChunk() now detects when a translation service
+      silently returns the original text unchanged (a known failure
+      mode of the free Lingva/MyMemory APIs on short phrases) and
+      automatically retries with the other service instead of
+      trusting a "successful" but untranslated result.
    ============================================================ */
 
 const STORAGE_KEY = "talkconnect_prefs_v1";
@@ -695,6 +706,7 @@ if (answerBtn) {
 // every connection — like actually hanging up a phone, not just pausing.
 function hangUp() {
   stopRinging();
+  clearTimeout(callTurnTimer);
   const banner = document.getElementById("incomingCallBanner");
   if (banner) banner.style.display = "none";
   targetHostId = null;
@@ -892,13 +904,28 @@ async function speakTranslation(translatedText, targetLangObj) {
   }
 }
 
+// ---- CHANGE: detects a known free-service failure mode ----
+// Lingva and MyMemory sometimes answer "successfully" (HTTP 200) but just
+// hand back the original text unchanged, instead of a real translation —
+// this is why Emmanuel sometimes heard untranslated speech even though no
+// error ever appeared. We can't fix the services themselves (they're free
+// and outside our control), but we CAN detect this specific symptom and
+// automatically ask the other service for a second opinion instead of
+// trusting a "successful" but untranslated result.
+function looksUntranslated(original, translated, sourceLang, targetLang) {
+  if (sourceLang === targetLang) return false; // no translation was ever needed
+  const normalize = (s) => s.trim().toLowerCase();
+  return normalize(original) === normalize(translated);
+}
+
 // MyMemory truncates/rejects long queries, so split into sentence-sized
 // chunks and translate each in turn — this avoids ever cutting off mid-
 // sentence on longer conversations (multiple speak/pause turns before End).
 // Tries Lingva Translate first (proxies real Google Translate — much better
 // quality than MyMemory's translation-memory matching, which sometimes
 // returns a completely unrelated "closest match" phrase instead of a real
-// translation). Falls back to MyMemory if Lingva's public instance is down.
+// translation). Falls back to MyMemory if Lingva's public instance is down
+// OR if Lingva quietly returned the text unchanged (see looksUntranslated).
 async function translateChunk(chunk, sourceLang, targetLang) {
   try {
     const res = await fetch(
@@ -906,22 +933,33 @@ async function translateChunk(chunk, sourceLang, targetLang) {
     );
     if (res.ok) {
       const data = await res.json();
-      if (data && data.translation) return data.translation;
+      if (data && data.translation) {
+        if (!looksUntranslated(chunk, data.translation, sourceLang, targetLang)) {
+          return data.translation;
+        }
+        console.warn(
+          "[TalkConnect] Lingva returned the text unchanged (likely failed silently) — trying MyMemory as a second opinion."
+        );
+      } else {
+        throw new Error("Lingva returned no translation");
+      }
+    } else {
+      throw new Error("Lingva unavailable");
     }
-    throw new Error("Lingva unavailable");
   } catch (err) {
     console.warn("[TalkConnect] Lingva failed, falling back to MyMemory:", err);
-    const params = new URLSearchParams({
-      q: chunk.slice(0, 500),
-      langpair: `${sourceLang}|${targetLang}`,
-    });
-    const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
-    const data = await res.json();
-    if (data.responseStatus !== 200 || !data.responseData) {
-      throw new Error(data.responseDetails || "Translation failed");
-    }
-    return data.responseData.translatedText;
   }
+
+  const params = new URLSearchParams({
+    q: chunk.slice(0, 500),
+    langpair: `${sourceLang}|${targetLang}`,
+  });
+  const res = await fetch(`${TRANSLATE_ENDPOINT}?${params}`);
+  const data = await res.json();
+  if (data.responseStatus !== 200 || !data.responseData) {
+    throw new Error(data.responseDetails || "Translation failed");
+  }
+  return data.responseData.translatedText;
 }
 
 async function translateLongText(text, sourceLang, targetLang) {
@@ -953,6 +991,31 @@ let recognizedText = "";
 let finalTranscript = "";
 let micState = "idle"; // idle | listening | paused
 let speechUnlocked = false;
+
+// ---- CHANGE: real "end of turn" detection during a call ----
+// Previously, EVERY short breathing pause made SpeechRecognition's onend
+// fire, which immediately translated and sent whatever had been said so
+// far — cutting you off mid-sentence. Now, a pause only SCHEDULES a
+// translate 1.8 seconds in the future; if you keep talking (and pause
+// again) before that time is up, the schedule is reset and pushed back
+// again. Only a genuinely longer silence actually sends your turn — like
+// a person waiting a beat before assuming you're done talking.
+// (Provisional value — raise it further if it still cuts in too early,
+// or lower it if replies feel too slow.)
+let callTurnTimer = null;
+const CALL_TURN_SILENCE_MS = 1800;
+
+function scheduleCallTurn() {
+  clearTimeout(callTurnTimer);
+  callTurnTimer = setTimeout(() => {
+    if (dataConn && dataConn.open && finalTranscript.trim()) {
+      const capturedText = finalTranscript.trim();
+      finalTranscript = "";
+      recognizedText = "";
+      autoTranslateAndSend(capturedText);
+    }
+  }, CALL_TURN_SILENCE_MS);
+}
 
 // Many mobile browsers only allow speechSynthesis.speak() if it has been
 // called at least once directly inside a user gesture (tap). Our real speak()
@@ -1030,14 +1093,12 @@ function startRecognitionSession(bcp47Lang) {
 
   recognition.onend = () => {
     if (micState === "listening") {
-      // In a live call: treat each natural pause like a real conversation
-      // turn — translate and send automatically, then keep listening. No
-      // "End" button needed, just like a normal phone call.
+      // In a live call: a short pause no longer translates immediately —
+      // it just (re)schedules a check 1.8s from now (see scheduleCallTurn).
+      // If you keep talking, the next onend reschedules it again, pushing
+      // the translate further into the future until you actually stop.
       if (dataConn && dataConn.open && finalTranscript.trim()) {
-        const capturedText = finalTranscript.trim();
-        finalTranscript = "";
-        recognizedText = "";
-        autoTranslateAndSend(capturedText);
+        scheduleCallTurn();
       }
       startRecognitionSession(bcp47Lang);
     }
@@ -1051,8 +1112,8 @@ function startRecognitionSession(bcp47Lang) {
   }
 }
 
-// Called automatically after each natural pause during a live call — no
-// manual "End" button needed, like a real conversation turn.
+// Called automatically once a real pause (not just a breath) is detected
+// during a live call — see scheduleCallTurn() / CALL_TURN_SILENCE_MS above.
 async function autoTranslateAndSend(rawText) {
   const text = rawText.trim().replace(/(\p{L}+)(\s+\1\b)+/giu, "$1");
   console.log("[TalkConnect] autoTranslateAndSend() called with:", text);
