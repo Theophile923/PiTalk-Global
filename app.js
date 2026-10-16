@@ -70,8 +70,11 @@ function getVoicesAsync() {
   });
 }
 
-async function speakLocally(text, langName) {
-  if (!("speechSynthesis" in window)) return;
+async function speakLocally(text, langName, onDone) {
+  if (!("speechSynthesis" in window)) {
+    if (onDone) onDone();
+    return;
+  }
   const langObj = LANG_CODES[langName] || LANG_CODES["English"];
   window.speechSynthesis.cancel();
 
@@ -80,12 +83,18 @@ async function speakLocally(text, langName) {
   const voice =
     voices.find((v) => v.lang && v.lang.toLowerCase() === langObj.bcp47.toLowerCase()) ||
     voices.find((v) => v.lang && v.lang.toLowerCase().startsWith(prefix));
-  if (!voice) return; // no voice available on this device — nothing we can do locally either
+  if (!voice) {
+    if (onDone) onDone(); // no voice available on this device — still hand the turn back
+    return;
+  }
 
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = langObj.bcp47;
   utter.voice = voice;
   utter.rate = 0.92;
+  // Once this finishes speaking, it's the other person's turn to listen.
+  utter.onend = () => { if (onDone) onDone(); };
+  utter.onerror = () => { if (onDone) onDone(); };
   window.speechSynthesis.speak(utter);
 
   // Chrome desktop bug: speech synthesis silently pauses after ~15s on long
@@ -209,9 +218,16 @@ function setupCallEvents() {
     if (ringBtn) ringBtn.style.display = "none";
     const hangupBtn = document.getElementById("hangupBtn");
     if (hangupBtn) hangupBtn.style.display = "block";
-    // Phone-call feel: listening starts automatically once connected —
-    // no need to tap the mic at all.
-    startListening();
+    // Real phone-call order: whoever ANSWERED speaks first (the greeting).
+    // The caller just listens until that greeting has finished playing —
+    // see myTurnNow(), triggered once the joiner's audio arrives and plays.
+    if (!isCallHost) {
+      turnState = "mine";
+      startListening();
+    } else {
+      turnState = "theirs";
+      setStatus("Waiting for them to say hello…", "#9B5CE0");
+    }
   });
   activeCall.on("close", () => setConnectStatus("Call ended", false));
   activeCall.on("error", (err) => console.error("Call error:", err));
@@ -232,9 +248,15 @@ function setupDataConnEvents() {
         if (!audioHandledForCurrentTurn && pendingCaptionForFallback === data.text) {
           audioHandledForCurrentTurn = true;
           console.log("[TalkConnect] No audio arrived — falling back to local device voice.");
-          speakLocally(data.text, (document.getElementById("langYou") || {}).value);
+          speakLocally(data.text, (document.getElementById("langYou") || {}).value, myTurnNow);
         }
       }, 3500);
+      // Safety net: if NEITHER the real audio NOR the local fallback voice
+      // ever actually finishes (network hiccup, no matching voice on this
+      // device, etc.), don't leave the conversation stuck waiting forever —
+      // hand the turn back anyway after a generous delay.
+      clearTimeout(turnFailsafeTimer);
+      turnFailsafeTimer = setTimeout(myTurnNow, 8000);
     } else if (data && data.type === "joined") {
       // The other pioneer connected — the host can now ring them.
       const ringBtn = document.getElementById("ringBtn");
@@ -259,10 +281,21 @@ function setupDataConnEvents() {
         const blobUrl = URL.createObjectURL(blob);
         const audio = new Audio(blobUrl);
         audio.onplay = () => console.log("[TalkConnect] Received audio playback started.");
-        audio.onended = () => URL.revokeObjectURL(blobUrl);
-        audio.play().catch((err) => console.error("[TalkConnect] Playback of received translation failed:", err));
+        // Only once I've actually FINISHED hearing their translated voice
+        // does it become my turn to talk — this is what makes the
+        // conversation alternate like a real phone call instead of both
+        // sides listening at once.
+        audio.onended = () => {
+          URL.revokeObjectURL(blobUrl);
+          myTurnNow();
+        };
+        audio.play().catch((err) => {
+          console.error("[TalkConnect] Playback of received translation failed:", err);
+          myTurnNow(); // don't leave the conversation stuck if playback fails
+        });
       } catch (err) {
         console.error("[TalkConnect] Could not play received translation audio:", err);
+        myTurnNow();
       }
     } else if (typeof data === "string") {
       // Backward-compatible fallback for plain-text messages.
@@ -707,6 +740,8 @@ if (answerBtn) {
 function hangUp() {
   stopRinging();
   clearTimeout(callTurnTimer);
+  clearTimeout(turnFailsafeTimer);
+  turnState = "theirs";
   const banner = document.getElementById("incomingCallBanner");
   if (banner) banner.style.display = "none";
   targetHostId = null;
@@ -749,7 +784,12 @@ function hangUp() {
 }
 
 const hangupBtnEl = document.getElementById("hangupBtn");
-if (hangupBtnEl) hangupBtnEl.addEventListener("click", hangUp);
+if (hangupBtnEl) {
+  // A single universal label — "END" is understood regardless of which
+  // language either pioneer has selected, so it never needs translating.
+  hangupBtnEl.textContent = "END";
+  hangupBtnEl.addEventListener("click", hangUp);
+}
 
 const newCodeBtn = document.getElementById("newCodeBtn");
 if (newCodeBtn) {
@@ -1000,10 +1040,31 @@ let speechUnlocked = false;
 // again) before that time is up, the schedule is reset and pushed back
 // again. Only a genuinely longer silence actually sends your turn — like
 // a person waiting a beat before assuming you're done talking.
-// (Provisional value — raise it further if it still cuts in too early,
-// or lower it if replies feel too slow.)
+// (Provisional value — lowered twice now: 1800ms -> 1100ms -> 900ms, for a
+// snappier feel. 900ms is close to the natural length of a real breathing
+// pause, so this is close to the practical floor — going much lower risks
+// cutting sentences mid-thought again (the original bug). If that starts
+// happening, raise it back up in small steps, e.g. 1100, then 1300.)
 let callTurnTimer = null;
-const CALL_TURN_SILENCE_MS = 1800;
+const CALL_TURN_SILENCE_MS = 900;
+
+// ---- CHANGE: real phone-call turn-taking ----
+// Like a real phone call, only ONE side's microphone is ever "live" at a
+// time. Whoever ANSWERS the call speaks first (the greeting), exactly like
+// picking up and saying "Hello, you're speaking with..."); the caller just
+// listens until the greeting has finished playing, THEN it becomes their
+// turn. From then on, the turn flips automatically after each person
+// finishes talking (see scheduleCallTurn below) and after the translated
+// audio finishes playing on the other side (see myTurnNow below).
+let turnState = "theirs"; // "mine" = my mic should be live now | "theirs" = stay silent, wait
+let turnFailsafeTimer = null; // safety net in case playback never finishes (see myTurnNow)
+
+function myTurnNow() {
+  clearTimeout(turnFailsafeTimer);
+  if (turnState === "mine") return; // already my turn — avoid starting twice
+  turnState = "mine";
+  if (micState !== "listening") startListening();
+}
 
 function scheduleCallTurn() {
   clearTimeout(callTurnTimer);
@@ -1012,6 +1073,13 @@ function scheduleCallTurn() {
       const capturedText = finalTranscript.trim();
       finalTranscript = "";
       recognizedText = "";
+      // I'm done talking — hand the turn over (like releasing a walkie-
+      // talkie button) and stop my own mic until it's my turn again.
+      turnState = "theirs";
+      try {
+        if (recognition) recognition.stop();
+      } catch {}
+      setStatus("Waiting for their reply…", "#9B5CE0");
       autoTranslateAndSend(capturedText);
     }
   }, CALL_TURN_SILENCE_MS);
@@ -1092,14 +1160,19 @@ function startRecognitionSession(bcp47Lang) {
   };
 
   recognition.onend = () => {
-    if (micState === "listening") {
-      // In a live call: a short pause no longer translates immediately —
-      // it just (re)schedules a check 1.8s from now (see scheduleCallTurn).
-      // If you keep talking, the next onend reschedules it again, pushing
-      // the translate further into the future until you actually stop.
-      if (dataConn && dataConn.open && finalTranscript.trim()) {
-        scheduleCallTurn();
-      }
+    if (micState !== "listening") return;
+
+    const inCall = dataConn && dataConn.open;
+    if (inCall) {
+      // During a call, only restart listening if it's still actually my
+      // turn — once scheduleCallTurn() hands the turn to the other side,
+      // we deliberately stay silent until myTurnNow() gives it back.
+      if (turnState !== "mine") return;
+      if (finalTranscript.trim()) scheduleCallTurn();
+      startRecognitionSession(bcp47Lang);
+    } else {
+      // Solo demo mode (no call) — unchanged: a short pause just restarts
+      // listening, the manual End button is what finalizes the text.
       startRecognitionSession(bcp47Lang);
     }
   };
