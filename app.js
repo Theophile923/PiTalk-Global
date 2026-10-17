@@ -258,10 +258,15 @@ function setupDataConnEvents() {
       clearTimeout(turnFailsafeTimer);
       turnFailsafeTimer = setTimeout(myTurnNow, 8000);
     } else if (data && data.type === "joined") {
-      // The other pioneer connected — the host can now ring them.
+      // The other pioneer just opened the link — ring them automatically
+      // right now, like a real phone call, instead of waiting for you to
+      // tap a separate "Ring" button.
+      if (dataConn && dataConn.open) {
+        dataConn.send({ type: "ring" });
+      }
+      setConnectStatus("📞 Ringing your pioneer…", false);
       const ringBtn = document.getElementById("ringBtn");
-      if (ringBtn) ringBtn.style.display = "inline-block";
-      setConnectStatus("Your pioneer joined — tap Ring to alert them", false);
+      if (ringBtn) ringBtn.style.display = "none"; // no longer needed — ringing is automatic now
     } else if (data && data.type === "ring") {
       const banner = document.getElementById("incomingCallBanner");
       if (banner) banner.style.display = "block";
@@ -367,10 +372,15 @@ async function startCall() {
   peerConn.on("open", () => {
     document.getElementById("roomCodeText").textContent = code;
     document.getElementById("roomCodeDisplay").style.display = "block";
-    setConnectStatus("Waiting for the other pioneer to join…", false);
+    setConnectStatus("📞 Calling… share the link above", false);
     setupShareLinkButton(code);
     showRoomQrCode(code);
     showSaveFavoritePrompt();
+    // Give the CALLER audible/visual "calling" feedback right away — like
+    // hearing a ring-back tone while a real phone call connects. This
+    // stops automatically once the other pioneer actually answers (see
+    // stopRinging() in setupCallEvents' "stream" handler) or you hang up.
+    startRinging();
   });
  
   peerConn.on("call", (incomingCall) => {
@@ -1457,4 +1467,3 @@ document.querySelectorAll(".btn--plan").forEach((btn) => {
   });
 });
  
-
