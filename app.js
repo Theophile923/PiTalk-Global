@@ -23,18 +23,62 @@
      persistent storage instead.
  
    ---- CHANGES (this version) ----
-   1. Call turns no longer fire on every micro-pause. A short timer
-      (CALL_TURN_SILENCE_MS) now waits for a REAL pause before
-      treating your speech as "done" and sending the translation —
-      see scheduleCallTurn() / CALL_TURN_SILENCE_MS below.
-   2. translateChunk() now detects when a translation service
-      silently returns the original text unchanged (a known failure
-      mode of the free Lingva/MyMemory APIs on short phrases) and
-      automatically retries with the other service instead of
-      trusting a "successful" but untranslated result.
+   1. NEW: a small red diagnostic box (showDiag) now appears at the
+      bottom of the screen whenever spoken-audio generation, sending
+      or playback fails. It shows the EXACT reason (for example
+      "HTTP 429" or "Failed to fetch") and stays on screen until you
+      tap it — it is no longer erased when the transcript refreshes.
+   2. sendSpokenTranslation() now: checks the audio really is audio
+      (not an empty/error reply), retries once after a short wait,
+      and tells you whether it failed while GENERATING the voice or
+      while SENDING it to the other pioneer.
+   3. NEW: when the voice can't be generated, the speaker's app now
+      tells the other pioneer's app ("audio_failed") so it speaks the
+      caption with its own device voice immediately, instead of
+      waiting ~3.5 seconds in silence.
+   4. Receiving side: a failed or undecodable audio playback is now
+      reported in the diagnostic box too, not only in the console.
+   (Earlier changes kept: call-turn pause timer, untranslated-text
+   detection with automatic second-opinion translation.)
    ============================================================ */
  
 const STORAGE_KEY = "talkconnect_prefs_v1";
+ 
+// ============================================================
+// Diagnostic box — a small red panel fixed at the bottom of the
+// screen. Think of it as a "black box" recorder on a plane: when
+// something goes wrong, it writes down exactly what and why, in a
+// place that does not get wiped when the conversation text
+// refreshes. Tap the box to close it.
+// ============================================================
+function showDiag(message) {
+  try {
+    let box = document.getElementById("tcDiag");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "tcDiag";
+      box.style.cssText =
+        "position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;" +
+        "max-height:35vh;overflow:auto;background:rgba(20,10,30,.95);" +
+        "color:#fff;border:1px solid #E8546B;border-radius:10px;" +
+        "padding:8px 10px;font:12px/1.45 monospace;";
+      const title = document.createElement("div");
+      title.style.cssText = "color:#E8546B;font-weight:bold;margin-bottom:4px;";
+      title.textContent = "TalkConnect diagnostic — tap to close";
+      title.dataset.keep = "1";
+      box.appendChild(title);
+      box.addEventListener("click", () => box.remove());
+      document.body.appendChild(box);
+    }
+    const line = document.createElement("div");
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    box.appendChild(line);
+    // Keep the title + only the 6 most recent lines.
+    while (box.children.length > 7) box.removeChild(box.children[1]);
+  } catch (err) {
+    console.error("Could not show diagnostic box:", err);
+  }
+}
  
 // ============================================================
 // Peer-to-peer connection between two pioneers (PeerJS, free
@@ -84,6 +128,7 @@ async function speakLocally(text, langName, onDone) {
     voices.find((v) => v.lang && v.lang.toLowerCase() === langObj.bcp47.toLowerCase()) ||
     voices.find((v) => v.lang && v.lang.toLowerCase().startsWith(prefix));
   if (!voice) {
+    showDiag(`No local device voice found for "${langObj.bcp47}" — nothing can be spoken on this device.`);
     if (onDone) onDone(); // no voice available on this device — still hand the turn back
     return;
   }
@@ -257,6 +302,18 @@ function setupDataConnEvents() {
       // hand the turn back anyway after a generous delay.
       clearTimeout(turnFailsafeTimer);
       turnFailsafeTimer = setTimeout(myTurnNow, 8000);
+    } else if (data && data.type === "audio_failed") {
+      // The other pioneer's app could not generate the spoken audio. Instead
+      // of waiting for the 3.5-second timer, speak the caption right now with
+      // this device's own voice. The same hard lock as above makes sure the
+      // voice can never play twice for one turn.
+      console.log("[TalkConnect] Other side reported audio_failed — speaking caption locally now.");
+      if (!audioHandledForCurrentTurn && pendingCaptionForFallback) {
+        audioHandledForCurrentTurn = true;
+        clearTimeout(fallbackSpeakTimer);
+        const captionToSpeak = pendingCaptionForFallback;
+        speakLocally(captionToSpeak, (document.getElementById("langYou") || {}).value, myTurnNow);
+      }
     } else if (data && data.type === "joined") {
       // The other pioneer just opened the link — ring them automatically
       // right now, like a real phone call, instead of waiting for you to
@@ -294,12 +351,19 @@ function setupDataConnEvents() {
           URL.revokeObjectURL(blobUrl);
           myTurnNow();
         };
+        audio.onerror = () => {
+          URL.revokeObjectURL(blobUrl);
+          showDiag("Received audio could not be decoded/played (audio element error).");
+          myTurnNow();
+        };
         audio.play().catch((err) => {
           console.error("[TalkConnect] Playback of received translation failed:", err);
+          showDiag(`Playback of received audio was refused: ${err && err.name ? err.name : err}`);
           myTurnNow(); // don't leave the conversation stuck if playback fails
         });
       } catch (err) {
         console.error("[TalkConnect] Could not play received translation audio:", err);
+        showDiag(`Could not play received audio: ${err && err.message ? err.message : err}`);
         myTurnNow();
       }
     } else if (typeof data === "string") {
@@ -310,6 +374,60 @@ function setupDataConnEvents() {
   dataConn.on("error", (err) => console.error("Data channel error:", err));
 }
  
+// ---- Spoken-translation generation, with clear failure reasons ----
+// Turns a technical error into a short, readable code you can report back.
+function describeSpeechProblem(err) {
+  if (!err) return "unknown error";
+  if (err.code) return err.code; // our own, already readable (e.g. "HTTP 429")
+  const msg = err.message || String(err);
+  if (err.name === "TypeError" || /failed to fetch|networkerror|load failed/i.test(msg)) {
+    return `NETWORK or CORS blocked (${msg})`;
+  }
+  return msg;
+}
+ 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+ 
+// Asks StreamElements for the spoken audio and checks the answer really is
+// audio — a "successful" reply that is empty or is an error message in
+// disguise would otherwise look fine and then fail silently later.
+async function fetchSpeechAudio(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    const e = new Error(`Speech request failed: ${res.status}`);
+    e.code = `HTTP ${res.status}`;
+    throw e;
+  }
+  const type = (res.headers.get("content-type") || "").toLowerCase();
+  const buffer = await res.arrayBuffer();
+  if (buffer.byteLength < 1000) {
+    const e = new Error("Speech reply too small");
+    e.code = `EMPTY or too small reply (${buffer.byteLength} bytes, type "${type || "unknown"}")`;
+    throw e;
+  }
+  if (type && !type.includes("audio") && !type.includes("mpeg") && !type.includes("octet-stream")) {
+    const e = new Error("Speech reply is not audio");
+    e.code = `NOT AUDIO (type "${type}", ${buffer.byteLength} bytes)`;
+    throw e;
+  }
+  return buffer;
+}
+ 
+function reportSpeechFailure(step, problem, voice) {
+  console.error(`[TalkConnect] Spoken audio failed at step "${step}": ${problem}`);
+  transcript.innerHTML += `<p style="color:rgba(255,255,255,.45);font-size:.78rem;">🔇 Couldn't generate spoken audio this time — text translation was still sent.</p>`;
+  showDiag(`Spoken audio failed — step: ${step} | reason: ${problem} | voice: ${voice}`);
+  // Tell the other pioneer's app right away so it speaks the caption with
+  // its own device voice instead of waiting in silence.
+  try {
+    if (dataConn && dataConn.open) dataConn.send({ type: "audio_failed" });
+  } catch (err) {
+    console.error("[TalkConnect] Could not send audio_failed signal:", err);
+  }
+}
+ 
 // Generates the spoken translation audio (StreamElements) and sends it to
 // the connected pioneer over the data channel, so THEY hear the translation
 // in their own language — the live call audio alone only carries your raw
@@ -318,18 +436,34 @@ async function sendSpokenTranslation(text, targetLangObj) {
   console.log("[TalkConnect] sendSpokenTranslation() called with:", text);
   const voice = getVoiceId(targetLangObj.iso);
   const url = `https://api.streamelements.com/kappa/v2/speech?voice=${voice}&text=${encodeURIComponent(text.slice(0, 500))}`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Speech request failed: ${res.status}`);
-    const buffer = await res.arrayBuffer();
-    console.log("[TalkConnect] TTS audio generated, bytes:", buffer.byteLength);
-    if (dataConn && dataConn.open) {
-      dataConn.send({ type: "audio", buffer });
-      console.log("[TalkConnect] Audio buffer sent over data channel.");
+ 
+  // Step 1 — generate the voice (two attempts: free services sometimes
+  // hiccup once and then work on the very next try).
+  let buffer = null;
+  let lastProblem = "";
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      buffer = await fetchSpeechAudio(url);
+      console.log(`[TalkConnect] TTS audio generated (attempt ${attempt}), bytes:`, buffer.byteLength);
+      break;
+    } catch (err) {
+      lastProblem = describeSpeechProblem(err);
+      console.warn(`[TalkConnect] TTS attempt ${attempt} failed: ${lastProblem}`);
+      if (attempt === 1) await sleep(700);
     }
+  }
+  if (!buffer) {
+    reportSpeechFailure("generation", lastProblem, voice);
+    return;
+  }
+ 
+  // Step 2 — send it to the other pioneer.
+  try {
+    if (!(dataConn && dataConn.open)) throw new Error("data channel is closed");
+    dataConn.send({ type: "audio", buffer });
+    console.log("[TalkConnect] Audio buffer sent over data channel.");
   } catch (err) {
-    console.error("[TalkConnect] Could not generate/send spoken translation:", err);
-    transcript.innerHTML += `<p style="color:rgba(255,255,255,.45);font-size:.78rem;">🔇 Couldn't generate spoken audio this time — text translation was still sent.</p>`;
+    reportSpeechFailure("sending", describeSpeechProblem(err), voice);
   }
 }
  
@@ -1221,6 +1355,7 @@ async function autoTranslateAndSend(rawText) {
     }
   } catch (err) {
     console.error("[TalkConnect] Auto-translate failed:", err);
+    showDiag(`Translation failed: ${err && err.message ? err.message : err}`);
   }
 }
  
@@ -1467,3 +1602,4 @@ document.querySelectorAll(".btn--plan").forEach((btn) => {
   });
 });
  
+Claude finished the response
